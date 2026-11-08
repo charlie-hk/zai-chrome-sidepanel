@@ -1,0 +1,124 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Z.ai Sidepanel</title>
+  <link rel="stylesheet" href="sidepanel.css" />
+</head>
+<body>
+  <!-- ── Header ─────────────────────────────────────────────── -->
+  <header class="hdr">
+    <div class="hdr-brand">
+      <img src="../icons/icon48.png" alt="" class="hdr-logo" />
+      <div class="hdr-titles">
+        <span class="hdr-name" title="Sidebar Agent for Z.ai — © 2026 A.Amini. All rights reserved.">Z.ai Agent</span>
+        <span id="connStatus" class="conn conn-off">Not connected</span>
+      </div>
+    </div>
+    <div class="hdr-actions">
+      <button id="btnConnect" class="btn btn-primary btn-sm" title="Connect to your logged-in chat.z.ai account">Connect</button>
+      <button id="btnSessions" class="btn btn-sm" title="Chat sessions">Sessions</button>
+      <button id="btnSettings" class="btn btn-sm" title="Settings">⚙</button>
+    </div>
+  </header>
+
+  <!-- ── Sessions drawer ────────────────────────────────────── -->
+  <section id="sessionsPanel" class="drawer hidden">
+    <div class="drawer-head">
+      <strong>Chat sessions</strong>
+      <button id="btnNewChat" class="btn btn-primary btn-sm">+ New chat</button>
+    </div>
+    <div id="sessionList" class="session-list">
+      <div class="muted small pad8">Click Connect first — sessions come from your chat.z.ai account.</div>
+    </div>
+  </section>
+
+  <!-- ── Settings drawer ────────────────────────────────────── -->
+  <section id="settingsPanel" class="drawer hidden">
+    <div class="drawer-head"><strong>Settings</strong></div>
+    <label class="fld">
+      <span>Model</span>
+      <div class="row">
+        <select id="modelSelect"></select>
+        <button id="btnRefreshModels" class="btn btn-sm" title="Fetch model list from chat.z.ai">↻</button>
+      </div>
+    </label>
+    <label class="fld">
+      <span>Custom model id (optional)</span>
+      <input id="modelCustom" type="text" placeholder="e.g. glm-5.3" />
+    </label>
+    <label class="chk">
+      <input id="confirmMode" type="checkbox" checked />
+      <span>Ask before clicking / typing (recommended)</span>
+    </label>
+    <label class="chk">
+      <input id="autoAttach" type="checkbox" checked />
+      <span>Auto-attach current page on every message</span>
+    </label>
+    <div class="fld">
+      <span>Manual token (fallback if Connect fails)</span>
+      <input id="manualToken" type="password" placeholder="paste localStorage.token from chat.z.ai" />
+      <button id="btnSaveToken" class="btn btn-sm">Save token</button>
+    </div>
+    <div class="muted small pad8">
+      Requests go straight from this browser to chat.z.ai using your own
+      session. Nothing is sent anywhere else. This is an unofficial
+      integration — it may break if Z.ai changes its site.
+    </div>
+  </section>
+
+  <!-- ── Page context chip ──────────────────────────────────── -->
+  <div id="pageChip" class="page-chip hidden">
+    <span class="page-chip-icon">📄</span>
+    <span id="pageChipText" class="page-chip-text">Page</span>
+    <button id="btnDetach" class="page-chip-x" title="Stop attaching this page">×</button>
+  </div>
+
+  <!-- ── Chat log ───────────────────────────────────────────── -->
+  <main id="chatLog" class="chat-log">
+    <div class="empty-state" id="emptyState">
+      <img src="../icons/icon128.png" alt="" class="empty-logo" />
+      <h2>Sidebar Agent for Z.ai</h2>
+      <p>
+        1. Click <b>Connect</b> — it links the panel to your logged-in
+        chat.z.ai account.<br />
+        2. Ask anything about <b>this page</b>, or tell the agent to click,
+        fill or scroll. It will ask before acting.
+      </p>
+      <p class="muted small">Now you can chat in your language.<br />© 2026 A.Amini — creator &amp; owner. All rights reserved.</p>
+    </div>
+  </main>
+
+  <!-- ── Pending action (confirm mode) ──────────────────────── -->
+  <!-- ── File bridge menu (📎) ───────────────────────────────── -->
+  <div id="fileMenu" class="file-menu hidden">
+    <button id="btnPickFolder" class="btn btn-sm" title="Pick a whole project folder (subfolders like node_modules/.git are skipped)">📁 Folder…</button>
+    <button id="btnPickFiles" class="btn btn-sm" title="Pick one or more files">📄 Files…</button>
+  </div>
+  <input id="filePickFolder" type="file" webkitdirectory multiple class="visually-hidden" />
+  <input id="filePickFiles" type="file" multiple class="visually-hidden" />
+
+  <section id="pendingAction" class="pending hidden">
+    <div class="pending-head">⚠ Agent wants to act</div>
+    <pre id="pendingCode" class="pending-code"></pre>
+    <div class="pending-btns">
+      <button id="btnApprove" class="btn btn-primary btn-sm">Approve</button>
+      <button id="btnSkip" class="btn btn-sm">Skip</button>
+    </div>
+  </section>
+
+  <!-- ── Composer ───────────────────────────────────────────── -->
+  <footer class="composer">
+    <button id="btnStop" class="btn btn-sm btn-danger hidden" title="Stop the agent">■ Stop</button>
+    <button id="btnAttach" class="btn btn-sm" title="Read the current page now">📄</button>
+    <button id="btnFiles" class="btn btn-sm" title="Attach files or a project folder from your disk for the agent">📎</button>
+    <textarea id="input" rows="1" placeholder="Ask about this page… (Enter to send)"></textarea>
+    <button id="btnSend" class="btn btn-primary" title="Send">➤</button>
+  </footer>
+
+  <div id="toast" class="toast hidden"></div>
+
+  <script src="sidepanel.js"></script>
+</body>
+</html>

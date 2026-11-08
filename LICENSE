@@ -1,0 +1,54 @@
+# License — Sidebar Agent for Z.ai (build 1.0.16)
+
+**Copyright (c) 2026 A.Amini — creator & owner. All rights reserved.**
+
+This software is the original work of A.Amini ("the Author"), who holds all
+rights, title and interest in it. "Sidebar Agent for Z.ai" is an unofficial
+project and is not affiliated with, endorsed by, or connected to Z.ai.
+
+## Terms
+
+1. You may install and use this extension for personal, non-commercial
+   purposes, with your own Z.ai account.
+2. You may **not** redistribute, republish, sell, sublicense, or distribute
+   modified copies of this software, and you may not remove or alter the
+   copyright notice or the build signature, without the Author's prior
+   written permission.
+3. THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS
+   OR IMPLIED. THE AUTHOR IS NOT LIABLE FOR ANY DAMAGES ARISING FROM ITS
+   USE.
+
+## Signed build manifest
+
+Every packaged file below is covered by an SHA-256 manifest signed with the
+Author's ECDSA P-256 key. Two files carry the signature itself and are
+therefore not listed: `background.js` (embeds the verification blob and
+checks the manifest on every startup — see the browser console) and this
+`LICENSE` file.
+
+You can verify a copy yourself: extract the extension folder, save the
+`sha256sum` block below to a file, then run `sha256sum -c <that file>`
+from inside the folder — every line must say OK, and the signature below
+must verify against the public key shown.
+
+```
+6e11c2899b3f96d8deeb7d94b602b38e261f157e3ea18c9e67ecc4ab79384aa5  manifest.json
+8300d2329adfb157b0f17c63b1c01023e2cd035f7f46f5f9d793a9558d3f6749  agent/agent.js
+8941525f97e3565c8627542d3ac6717395fb46d993813cb6bec584d58bf62df0  panel/sidepanel.html
+54bd5729bcfd4b02f34dcd6ad07130dda4454fee87e158420b210f7a028708cc  panel/sidepanel.js
+c132a2cd49694c3acc21fcb1475c1edaa959d02b18fad86db25ff4270d853afd  panel/sidepanel.css
+b3a84b56d4a84c655612d5b4135dd225789b60cb496728ea94c7e67f4c73f47e  icons/icon16.png
+9da2bf8427c08f3751c74e6211c13a05af6e06a436b2ff2c1a4b4590934181ac  icons/icon48.png
+de11d85b1362ba6e60f38869e18e303a1ae199ff967953495229b294e798bd54  icons/icon128.png
+8d35d59020aae4c5b68cac86c915e519030b337828b38058db86a74d22085980  README.md
+dcf7393c23b2eca34e64c6e740c57cc1567718c882d32101e31b54b3d47d3e39  USER_GUIDE.md
+```
+
+- **Signature** (ECDSA P-256 / SHA-256, IEEE-P1363, base64):
+  `bDkkf7BQ+qMA2rAov2IdyHjG+zdzIRTt1WJrYKYOmlL2jgmrvb17kdzuNy8/5ki2ObxMqHuBXa2dfWy/lYE0Vg==`
+- **Public key** (SPKI DER, base64 — the private key is NOT published):
+  `MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAEHEsGZmKXIA9MDz2AZGmGLL6jtvcDEI8jxqdtv+nYcmAx4Rlxl4SjGKw1aeMla+p9+S54+qtXdHRuoqIN13xppg==`
+
+Signed manifests for authentic builds are published by **A.Amini**. If the
+console of a copy reports "⚠ Build integrity check failed", that copy has
+been modified or corrupted and is not an authentic A.Amini release.

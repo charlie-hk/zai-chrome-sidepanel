@@ -1,0 +1,41 @@
+{
+  "manifest_version": 3,
+  "name": "Sidebar Agent for Z.ai",
+  "short_name": "Zai Agent",
+  "author": "A.Amini",
+  "version": "1.0.16",
+  "description": "Unofficial side panel agent for Z.ai: ask about the current page, click, type and scroll with your approval. Uses your own account.",
+  "minimum_chrome_version": "116",
+  "permissions": [
+    "sidePanel",
+    "storage",
+    "tabs",
+    "scripting",
+    "activeTab",
+    "declarativeNetRequest"
+  ],
+  "host_permissions": [
+    "https://chat.z.ai/*",
+    "http://*/*",
+    "https://*/*"
+  ],
+  "background": {
+    "service_worker": "background.js"
+  },
+  "side_panel": {
+    "default_path": "panel/sidepanel.html"
+  },
+  "action": {
+    "default_title": "Open Z.ai Sidepanel",
+    "default_icon": {
+      "16": "icons/icon16.png",
+      "48": "icons/icon48.png",
+      "128": "icons/icon128.png"
+    }
+  },
+  "icons": {
+    "16": "icons/icon16.png",
+    "48": "icons/icon48.png",
+    "128": "icons/icon128.png"
+  }
+}
