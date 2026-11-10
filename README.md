@@ -32,6 +32,8 @@ before it acts.
   only names paths; file bytes go straight from the extension to the page.
 - **Confirm mode (default ON)** — every click/type/upload shows an
   Approve / Skip card before touching the page.
+- **Data controls** — **Disconnect** forgets the saved Z.ai token, **Clear
+  chat** wipes the panel's conversation history (both in Settings).
 - **Streaming** — SSE is parsed exactly like the web app does
   (`edit_content` / `edit_index` / `delta_content`), with GLM reasoning
   shown in a collapsible 💭 block.
@@ -69,9 +71,12 @@ before it acts.
 ## Captcha (automatic)
 
 chat.z.ai may answer with `FRONTEND_CAPTCHA_REQUIRED` (an Aliyun captcha is
-required for the request). The extension then runs **the site's own widget**
-(same SceneId, same SDK URL and options as the official `tR()` flow in the
-`prod-fe` bundle) inside your chat.z.ai tab:
+required for the request). The extension then operates **the site's own
+widget** (same SceneId, same hidden element and trigger button as the
+official `tR()` flow in the `prod-fe` bundle) inside your chat.z.ai tab —
+using only what the chat.z.ai page itself has already loaded. The extension
+never injects a script tag, never fetches and never executes remotely
+hosted code (Chrome Web Store policy):
 
 - the chat.z.ai tab is brought to the front (hidden tabs throttle timers and
   you could not see a slider anyway);
@@ -114,9 +119,12 @@ requests via `declarativeNetRequest` session rules.
 
 ## Security & privacy
 
-- Your token stays in the browser: it is read from chat.z.ai, kept in the
-  extension's local storage, and sent **only** to `https://chat.z.ai`.
-- No analytics, no third-party servers, no telemetry.
+- Your token stays in the browser: it is read from chat.z.ai and kept in
+  the panel's memory while connected; a manually pasted token sits in the
+  extension's local storage until Connect succeeds or you press
+  **Disconnect**. It is sent **only** to `https://chat.z.ai`.
+- No analytics, no third-party servers, no telemetry, no remotely hosted
+  code in any context.
 - Confirm mode is on by default; the agent never sees pages you haven't
   opened the panel on.
 

@@ -61,10 +61,16 @@
       <input id="manualToken" type="password" placeholder="paste localStorage.token from chat.z.ai" />
       <button id="btnSaveToken" class="btn btn-sm">Save token</button>
     </div>
+    <div class="settings-actions">
+      <button id="btnClearChat" class="btn btn-sm" title="Remove the panel's conversation history">Clear chat</button>
+      <button id="btnDisconnect" class="btn btn-sm btn-danger" title="Forget the saved Z.ai token and disconnect">Disconnect</button>
+    </div>
     <div class="muted small pad8">
       Requests go straight from this browser to chat.z.ai using your own
       session. Nothing is sent anywhere else. This is an unofficial
       integration — it may break if Z.ai changes its site.
+      Disconnect removes the saved token; Clear chat removes the panel's
+      conversation history.
     </div>
   </section>
 

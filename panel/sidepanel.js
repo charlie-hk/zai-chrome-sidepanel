@@ -6,7 +6,7 @@
 "use strict";
 
 // build marker — verify in DevTools console of the side panel
-console.log("[Sidebar Agent] build 1.0.16 — signed release © 2026 A.Amini (integrity self-check in the background worker); 📎 file bridge + upload action, hardened agent persona");
+console.log("[Sidebar Agent] build 1.0.18 — signed release © 2026 A.Amini (integrity self-check in the background worker); compliance pass: no remotely hosted code anywhere, Disconnect/Clear-chat data controls, hardened markdown links");
 
 /* ═══════════════════════════ constants ═══════════════════════════ */
 
@@ -117,7 +117,15 @@ function mdLite(s) {
   out = out.replace(/```([\s\S]*?)```/g, (_, c) => `<pre class="code">${c.trim()}</pre>`);
   out = out.replace(/`([^`\n]+)`/g, '<code class="inline">$1</code>');
   out = out.replace(/\*\*([^*\n]+)\*\*/g, "<b>$1</b>");
-  out = out.replace(/\[([^\]]+)\]\((https?:[^)\s]+)\)/g, '<a href="$2" target="_blank">$1</a>');
+  // links: only allow clean http(s) URLs (no quotes/backslashes) and escape
+  // any " before it lands inside an href attribute — untrusted model/page
+  // text can otherwise break out of the attribute (CWS safe-data handling)
+  out = out.replace(/\[([^\]]+)\]\((https?:[^)\s]+)\)/g, (m, label, url) => {
+    const safe = /^[^\s"'`<>\\]+$/.test(url) ? url.replace(/"/g, "%22") : null;
+    return safe
+      ? `<a href="${safe}" target="_blank" rel="noopener noreferrer">${label}</a>`
+      : m;
+  });
   return out.replace(/\n/g, "<br/>");
 }
 
@@ -1708,6 +1716,29 @@ document.addEventListener("DOMContentLoaded", async () => {
       localStorage.setItem("zaiManualToken", t);
       toast("Token saved. Click Connect to use it.");
     }
+  };
+
+  // privacy / data controls (matches the published privacy policy)
+  $("btnDisconnect").onclick = () => {
+    state.token = "";
+    state.userId = "";
+    state.userName = "";
+    state.chatId = uuid();
+    state.chatTitle = "New chat";
+    state.messages = [];
+    state.attached = null;
+    state.fileBridge = [];
+    $("pageChip").classList.add("hidden");
+    localStorage.setItem("zaiManualToken", "");
+    renderHistory();
+    updateAttachBadge();
+    setConn("Not connected", "conn-off");
+    toast("Disconnected — the saved Z.ai token was removed from this browser.");
+  };
+  $("btnClearChat").onclick = () => {
+    state.messages = [];
+    renderHistory();
+    toast("Panel chat history cleared.");
   };
 
   $("btnSend").onclick = send;

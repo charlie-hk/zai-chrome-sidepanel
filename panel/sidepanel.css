@@ -87,6 +87,7 @@ body { display: flex; flex-direction: column; }
 }
 .row { display: flex; gap: 6px; }
 .row select { flex: 1; }
+.settings-actions { display: flex; gap: 8px; margin: 4px 0 12px; }
 .chk { display: flex; align-items: center; gap: 8px; margin: 8px 0; font-size: 12.5px; cursor: pointer; }
 .session-list { display: flex; flex-direction: column; gap: 4px; }
 .session-item {

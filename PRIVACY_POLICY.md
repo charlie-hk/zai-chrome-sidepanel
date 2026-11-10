@@ -1,6 +1,6 @@
 # Privacy Policy — Sidebar Agent for Z.ai
 
-_Last updated: November 7, 2026_
+_Last updated: November 10, 2026_
 
 ## Overview
 
@@ -12,17 +12,22 @@ receive copies of anything the extension processes.
 
 ## Data stored on your device
 
-The extension stores the following in your browser's local extension
-storage (`chrome.storage.local`):
+The extension is local-first. While you are connected, your chat.z.ai
+session token is held in the side panel's **memory** only; it is not
+written to disk and it disappears when the panel or the browser closes.
+Additionally, the side panel's own local storage inside your browser (an
+extension-scoped area readable only by this extension) may hold:
 
-- Your chat.z.ai session token (used only to authenticate to chat.z.ai on
-  your behalf).
+- A session token **you pasted manually** — saved until Connect succeeds
+  or until you press **Disconnect**.
 - Your settings (e.g., model choice, confirmation mode).
-- Your panel conversation history.
+- Your panel conversation history lives in the panel's memory for the
+  current session only; **Clear chat** (or **New chat**) removes it
+  immediately.
 
 This data never leaves your machine except as described below, is never
-sold, and is removed when you uninstall the extension (or use the
-"Disconnect" / "Forget token" controls in the panel).
+sold, and is removed when you uninstall the extension or press
+**Disconnect** in the Settings drawer.
 
 ## Data sent over the network
 
@@ -37,9 +42,19 @@ When you use the panel, the extension sends requests **only** to
   locally in the page; only page text relevant to your request is sent
   to chat.z.ai.
 
-The extension communicates with no other servers. It contains no
-analytics, no advertising, no tracking, no logging service, and does not
-execute remotely hosted code.
+The extension communicates with no other servers, sends nothing on its
+own initiative, and contains no analytics, no advertising, no tracking
+and no logging service. It never fetches, injects or executes remotely
+hosted code in any context (extension pages or web pages).
+
+## Captcha verification
+
+When chat.z.ai requires a verification, the extension operates the
+verification widget **that the chat.z.ai page itself has loaded** inside
+your own chat.z.ai tab — the same widget the official web app uses on
+every message send. The verification result is attached only to your
+request to chat.z.ai. The extension never sends anything to the
+verification provider or any other party.
 
 ## Third parties
 
@@ -49,8 +64,9 @@ Their handling of that data is governed by Z.ai's own privacy policy.
 
 ## Your control
 
-- "Disconnect" removes the stored token.
-- "Clear chat" removes panel conversation history.
+- **Disconnect** (Settings) removes the saved token and disconnects the
+  panel from your Z.ai account.
+- **Clear chat** (Settings) removes the panel's conversation history.
 - Uninstalling the extension removes all locally stored data.
 
 ## Contact
