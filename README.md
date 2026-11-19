@@ -136,11 +136,25 @@ not be compatible with the Z.ai terms of service — use it with your own
 account, at your own discretion, for personal automation. Don't use it
 for scraping at scale or abuse of any kind.
 
+## Changelog
+
+### v1.0.21 — bug fixes
+
+- **Green status spam fixed** — captcha / "at capacity" / WAF retry
+  notices no longer flood the chat with green boxes. They are now
+  hidden by default (console-only) and, when enabled in **Settings →
+  Show background retry / captcha status**, collapsed into a single
+  line that updates in place and disappears when the reply finishes.
+- **Raw tool JSON removed** — chat.z.ai's native `<glm_block>` markup
+  is stripped from displayed and stored text, so the chat shows clean
+  responses instead of `{"mcp_server":{"name":"action_click…"}}`.
+- **Actions now really execute** — native MCP calls are parsed and
+  converted into the extension's own `action` blocks, then executed
+  for real in the active tab. The model can no longer claim it
+  clicked/typed/sent something without actually doing it.
+
+### v1.0.18 — initial public release
+
 ## License & ownership
 
 © 2026 **A.Amini** — creator & owner. All rights reserved.
-
-This is a **signed build**: the packaged files are checksummed and signed
-with an ECDSA P-256 key held by the author (see `LICENSE`), and the
-background worker verifies that signature on every startup. Modified or
-corrupted copies announce themselves in the console.

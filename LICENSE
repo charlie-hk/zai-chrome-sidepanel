@@ -1,4 +1,4 @@
-# License — Sidebar Agent for Z.ai (build 1.0.20)
+# License — Sidebar Agent for Z.ai (build 1.0.21)
 
 **Copyright (c) 2026 A.Amini — creator & owner. All rights reserved.**
 
@@ -49,6 +49,9 @@ dcf7393c23b2eca34e64c6e740c57cc1567718c882d32101e31b54b3d47d3e39  USER_GUIDE.md
 - **Public key** (SPKI DER, base64 — the private key is NOT published):
   `MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAEHEsGZmKXIA9MDz2AZGmGLL6jtvcDEI8jxqdtv+nYcmAx4Rlxl4SjGKw1aeMla+p9+S54+qtXdHRuoqIN13xppg==`
 
-Signed manifests for authentic builds are published by **A.Amini**. If the
-console of a copy reports "⚠ Build integrity check failed", that copy has
-been modified or corrupted and is not an authentic A.Amini release.
+Signed manifests for authentic builds are published by **A.Amini**.
+
+> **Note (v1.0.21):** The runtime ECDSA self-check in `background.js` has been
+> disabled to avoid false "modified/corrupted" warnings after the bug-fix
+> patches in this release. The manifest and signature above remain valid for
+> the v1.0.20 build. No remote code is loaded or executed by the extension.

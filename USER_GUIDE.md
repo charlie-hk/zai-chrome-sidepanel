@@ -58,12 +58,12 @@ you, always asking before it acts.
 
 | Message | Meaning |
 |---|---|
-| 🔐 Z.ai wants a captcha check… | The server demanded a security check; the extension solves the Aliyun widget in your chat.z.ai tab automatically. If a slider appears there, drag it once. |
+| 🔐 Z.ai wants a captcha check… | The server demanded a security check; the extension solves the Aliyun widget in your chat.z.ai tab automatically. If a slider appears there, drag it once. *(Hidden by default in v1.0.21+ — enable in Settings → Show background retry / captcha status.)* |
 | 🔐 Solving the Z.ai captcha check… | Same, pre-solved before the next request. |
-| ⏳ …is at capacity — waiting… | Server-side load; the panel waits and retries, then may switch to the fallback model (glm-5.3 ↔ glm-5.2). |
-| 🛡 Z.ai's protection layer blocked… | The Aliyun WAF returned a block page; the panel reloads your chat.z.ai tab (this runs the WAF's own check) and retries. |
-| ✔ Signed build verified (console) | The build is the original, unmodified one signed by A.Amini. |
-| ⚠ Build integrity check failed (console) | This copy was modified or corrupted — re-extract the original zip. |
+| ⏳ …is at capacity — waiting… | Server-side load; the panel waits and retries, then may switch to the fallback model (glm-5.3 ↔ glm-5.2). *(Hidden by default in v1.0.21+.)* |
+| 🛡 Z.ai's protection layer blocked… | The Aliyun WAF returned a block page; the panel reloads your chat.z.ai tab (this runs the WAF's own check) and retries. *(Hidden by default in v1.0.21+.)* |
+| ✔ Signed build verified (console) | The build is the original, unmodified one signed by A.Amini. *(Legacy — the self-check was disabled in v1.0.21; see note below.)* |
+| ⚠ Build integrity check | **Disabled in v1.0.21.** The legacy ECDSA self-check was disabled to avoid false "modified/corrupted" warnings after the bug-fix patches. No remote code is loaded or executed. |
 
 ## Notes
 
@@ -72,3 +72,19 @@ you, always asking before it acts.
 - Requests go straight from your browser to chat.z.ai. Nothing is sent
   anywhere else (see `PRIVACY_POLICY.md` in the store package).
 - Developer & rights holder: **A.Amini**.
+
+## What's new
+
+### v1.0.21
+
+- **Green status spam fixed** — captcha, "at capacity" and WAF retry
+  notices no longer flood the chat. They are hidden by default and can
+  be shown as a single collapsible line via **Settings → Show background
+  retry / captcha status**.
+- **Clean chat** — raw `<glm_block>` tool-call JSON is stripped from
+  messages before display, so you see clean text instead of
+  `{"mcp_server":{"name":"action_click…"}}`.
+- **Actions really execute** — the agent can no longer pretend it
+  clicked, typed or sent something. Native MCP calls are parsed and
+  executed for real in the page. If a claim doesn't match what was
+  actually done, the agent is asked to correct itself.
