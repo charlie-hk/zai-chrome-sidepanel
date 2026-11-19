@@ -113,6 +113,18 @@
     el.dispatchEvent(new Event("change", { bubbles: true }));
   }
 
+  // read back what the field REALLY holds — the ground truth for the
+  // type/press verification the model reports to the user
+  function readVal(el) {
+    if (!el) return "";
+    if (el.isContentEditable) return String(el.innerText || el.textContent || "");
+    return String(el.value == null ? "" : el.value);
+  }
+
+  function sleep(ms) {
+    return new Promise((r) => setTimeout(r, ms));
+  }
+
   const handlers = {
     read() {
       return snapshot();
@@ -123,25 +135,55 @@
       el.click();
       return { ok: true, title: document.title };
     },
-    type(cmd) {
+    async type(cmd) {
       if (typeof cmd.text !== "string") throw new Error("type requires text");
       const el = findTarget(cmd.target || cmd.selector || cmd.element);
       el.scrollIntoView({ block: "center" });
       el.focus();
       if (el.isContentEditable) {
-        el.textContent = cmd.text;
-        fireInput(el);
+        // rich editors (Lexical/Slate/ProseMirror/React) ignore direct
+        // textContent writes — execCommand walks the real editing pipeline
+        let exec = false;
+        try {
+          exec =
+            document.execCommand("selectAll", false, null) &&
+            document.execCommand("insertText", false, cmd.text);
+        } catch {}
+        if (!exec) {
+          el.textContent = cmd.text;
+          fireInput(el);
+        }
       } else {
         // React-friendly: use the native setter so frameworks notice
+        // (FIX 1.0.20: this used the undefined variable `text` — a strict-mode
+        // ReferenceError — so typing into ANY <input>/<textarea> failed)
         const proto =
           el.tagName === "TEXTAREA" ? HTMLTextAreaElement.prototype : HTMLInputElement.prototype;
         const setter = Object.getOwnPropertyDescriptor(proto, "value").set;
-        setter.call(el, text);
+        if (!setter)
+          throw new Error(
+            "target is not a typeable input/textarea/contenteditable — pick an input from the snapshot"
+          );
+        setter.call(el, cmd.text);
         fireInput(el);
       }
-      return { ok: true, title: document.title };
+      // VERIFY: read the value back — a page can silently reject or clear
+      // what we typed. Without this the model would claim success on a fail.
+      await sleep(150);
+      const now = readVal(el);
+      if (!now.replace(/\s+/g, "").length)
+        throw new Error(
+          "typed, but the field is still empty — the page rejected the text " +
+          "(some editors only accept real keystrokes): click the field first, then retry"
+        );
+      return {
+        ok: true,
+        title: document.title,
+        typed: now.length,
+        preview: now.slice(0, 60)
+      };
     },
-    press(cmd) {
+    async press(cmd) {
       const k = String(cmd.key || "Enter");
       let el = null;
       try {
@@ -151,6 +193,7 @@
         el = document.activeElement || document.body;
       }
       if (el && el.focus) el.focus();
+      const before = readVal(el);
       const init = { key: k, bubbles: true, cancelable: true };
       if (k === "Enter") { init.code = "Enter"; init.keyCode = 13; init.which = 13; }
       el.dispatchEvent(new KeyboardEvent("keydown", init));
@@ -162,15 +205,26 @@
         let form = null;
         try { form = el.closest ? el.closest("form") : null; } catch {}
         if (form) {
-          const before = location.href;
+          const hrefBefore = location.href;
           setTimeout(() => {
             try {
-              if (location.href === before && form.requestSubmit) form.requestSubmit();
+              if (location.href === hrefBefore && form.requestSubmit) form.requestSubmit();
             } catch {}
           }, 250);
         }
       }
-      return { ok: true, title: document.title };
+      // VERIFY: a chat/search input that emptied itself after Enter means the
+      // page really submitted; text still sitting there means it did NOT.
+      await sleep(350);
+      const after = readVal(el);
+      const had = before.replace(/\s+/g, "").length > 0;
+      const cleared = had && !after.replace(/\s+/g, "").length;
+      const out = { ok: true, title: document.title };
+      if (cleared) out.notice = "input cleared after Enter — message submitted";
+      else if (had)
+        out.notice =
+          "input still holds the text — Enter did NOT submit it; take a fresh read and click the send button instead";
+      return out;
     },
     scroll({ direction }) {
       const map = {
@@ -258,7 +312,15 @@
     const fn = handlers[cmd.action];
     try {
       if (!fn) throw new Error("unknown action: " + cmd.action);
-      sendResponse(fn(cmd));
+      const out = fn(cmd);
+      // type/press are async (they verify by reading the value back)
+      if (out && typeof out.then === "function") {
+        out.then(sendResponse).catch((e) =>
+          sendResponse({ error: String(e && e.message ? e.message : e) })
+        );
+      } else {
+        sendResponse(out);
+      }
     } catch (e) {
       sendResponse({ error: String(e && e.message ? e.message : e) });
     }

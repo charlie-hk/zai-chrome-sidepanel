@@ -1,4 +1,4 @@
-# License — Sidebar Agent for Z.ai (build 1.0.18)
+# License — Sidebar Agent for Z.ai (build 1.0.20)
 
 **Copyright (c) 2026 A.Amini — creator & owner. All rights reserved.**
 
@@ -32,11 +32,11 @@ from inside the folder — every line must say OK, and the signature below
 must verify against the public key shown.
 
 ```
-00a6a4acadd5a55488af42d2f5d1fab9c03a14e3be065899da4df34e3d8b00e8  manifest.json
-8300d2329adfb157b0f17c63b1c01023e2cd035f7f46f5f9d793a9558d3f6749  agent/agent.js
+90e7a087595fb4b77e8a5b254589a6c1b2e41c808c0f6867b882d77f327e6290  manifest.json
+903bde1fc24c7938e21edf9b45130fa1d40feb458ef014c7ae7fa9cebd8acf09  agent/agent.js
 2176fa7f3710db3cf43e09134acf3fbafd9126529b6e27cde259c6c1f2588b17  panel/sidepanel.html
-a5cb62bd100260c0d91393f59e2b0b01937965e2faa5ce730da1b2d74dfae1d5  panel/sidepanel.js
-5342c8b7b22fff2a7480e783daad02e4351d37ff51ba34c30c89eeae8b6aeb6b  panel/sidepanel.css
+f95fb15f106c3656ad985ef63a136be6943dcad19d231660947f317d40bcf43b  panel/sidepanel.js
+776e7e13f3f2f9863868eb2b6c306a287c0500742af81cd78b9d211f83af8d3d  panel/sidepanel.css
 b3a84b56d4a84c655612d5b4135dd225789b60cb496728ea94c7e67f4c73f47e  icons/icon16.png
 9da2bf8427c08f3751c74e6211c13a05af6e06a436b2ff2c1a4b4590934181ac  icons/icon48.png
 de11d85b1362ba6e60f38869e18e303a1ae199ff967953495229b294e798bd54  icons/icon128.png
@@ -45,7 +45,7 @@ dcf7393c23b2eca34e64c6e740c57cc1567718c882d32101e31b54b3d47d3e39  USER_GUIDE.md
 ```
 
 - **Signature** (ECDSA P-256 / SHA-256, IEEE-P1363, base64):
-  `kp/NNw0i466gglrEUk5O3FEr3f4HXHxn5Ehf3qzso+SifhYwlLaQcw57eVa1Zl00gKslgXj4LJI2+Wo/UsgGyQ==`
+  `Ox/730Cuo1Xljl/FKqwOcIHv+LQS+WDsiLZV4uhOV3hvCfhs3UokAVuMgdPXiRD7zQ3z2hbHxgyt9VmmBmgIwA==`
 - **Public key** (SPKI DER, base64 — the private key is NOT published):
   `MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAEHEsGZmKXIA9MDz2AZGmGLL6jtvcDEI8jxqdtv+nYcmAx4Rlxl4SjGKw1aeMla+p9+S54+qtXdHRuoqIN13xppg==`
 

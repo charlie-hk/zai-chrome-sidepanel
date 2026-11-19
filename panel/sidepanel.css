@@ -162,6 +162,18 @@ body { display: flex; flex-direction: column; }
   max-width: 96%;
   white-space: pre-wrap;
 }
+/* collapsed tool results: a quiet one-liner; click to see the full output */
+.msg-tool summary {
+  cursor: pointer; user-select: none; color: #7fbfa2; list-style: none;
+}
+.msg-tool summary::-webkit-details-marker { display: none; }
+.msg-tool summary::before { content: "▸ "; color: #4f7f68; }
+.msg-tool[open] summary::before { content: "▾ "; }
+.msg-tool .tool-body {
+  margin-top: 6px; padding: 7px 9px; background: #0e1713;
+  border: 1px dashed #1f3a30; border-radius: 8px;
+  max-height: 220px; overflow-y: auto;
+}
 .msg-error {
   align-self: stretch;
   background: #2a1520;

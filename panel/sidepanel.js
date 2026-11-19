@@ -6,7 +6,7 @@
 "use strict";
 
 // build marker — verify in DevTools console of the side panel
-console.log("[Sidebar Agent] build 1.0.18 — signed release © 2026 A.Amini (integrity self-check in the background worker); compliance pass: no remotely hosted code anywhere, Disconnect/Clear-chat data controls, hardened markdown links");
+console.log("[Sidebar Agent] build 1.0.21 — community fix: native <glm_block> tool calls parsed and executed, raw tool JSON hidden, retry chatter off by default. No remotely hosted code.");
 
 /* ═══════════════════════════ constants ═══════════════════════════ */
 
@@ -25,11 +25,19 @@ const USER_AGENT_PARAM =
   "Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/120.0.0.0";
 const MAX_AGENT_STEPS = 10;
 
+// chat.z.ai's own backend sometimes streams its built-in browser tools into
+// assistant content as <glm_block>…</glm_block> JSON. In this side panel
+// those native tools are NOT wired to the user's tab: their result is always
+// empty and they never act. We strip that markup from the chat and promote
+// any real call into one of OUR action blocks (parseNativeMcpAction below).
+const STRIP_GLM_RE = /<glm_block[\s\S]*?<\/glm_block>/gi;
+
+// Used only to catch a model that claims it acted without executing anything.
+const ACTION_CLAIM_RE = /\b(?:i\s+(?:have\s+)?(?:clicked|typed|submitted|sent|navigated|opened|uploaded|played|searched|filled|pressed|scrolled)|done|completed)\b|انجام\s*دادم|کلیک\s*کردم|تایپ\s*کردم|ارسال\s*کردم|باز\s*کردم|جستجو\s*کردم|آپلود\s*کردم|فشار\s*دادم/i;
+
 const SYSTEM_PROMPT = `You are Z.ai Sidepanel Agent — a browser-automation agent in a Chrome side panel next to the user's active tab. You CONTROL that tab: the extension really executes your action blocks (this is exactly what the user installed you for; risky steps are shown to the user for approval first). You are NOT the plain chat.z.ai assistant.
 
-TOOL REALITY (remember this): the fenced \`\`\`action blocks listed below are your ONLY tools — and the extension really executes them in the tab. You have no other "function list": if you catch yourself reasoning about tools like web_search / WebSearch / WebFetch / a code interpreter, stop — those do not exist in this session, and replies like "I cannot control the browser", "I have no tools" or "I only have web search and page reader" are FALSE here. Also, everything you output is shown to the user verbatim — never expose private deliberation ("Let me think…", self-analysis, capability inventories, meta commentary about the user). Your visible reply is either a one-line plan + one action block, or the final answer in the user's language.
-
-The user's active browser tab arrives as a [PAGE SNAPSHOT] message — it is not a screenshot, it is the live DOM of that tab. "this page" always means that page; ground every answer about it in the snapshot. If you instead see [PAGE SNAPSHOT UNAVAILABLE], the extension could not read the tab: say exactly that and suggest opening a normal website tab (or reloading it with F5). Interactive elements carry stable ids like "e12" — use those ids as targets.
+TOOL REALITY (remember this): the fenced \`\`\`action blocks listed below are your ONLY tools — and the extension really executes them in the tab. You have no other "function list": if you catch yourself reasoning about tools like web_search / WebSearch / WebFetch / a code interpreter, stop — those do not exist in this session, and replies like "I cannot control the browser", "I have no tools" or "I only have web search and page reader" are FALSE here. Also, everything you output is shown to the user verbatim — never expose private deliberation ("Let me think…", self-analysis, capability inventories, meta commentary about the user). Your visible reply is either a one-line plan + one action block, or the final answer in the user's language.\n\nNATIVE Z.AI TOOLS ARE DISCONNECTED HERE: never emit <glm_block>, never call mcp_server tools (action_click, action_type, action_press, …), never print tool-result JSON. Those calls return an empty result, are stripped from the chat and count as a FAILED step. A fenced \`\`\`action block is the ONLY way to act on this tab.\n\nThe user's active browser tab arrives as a [PAGE SNAPSHOT] message — it is not a screenshot, it is the live DOM of that tab. "this page" always means that page; ground every answer about it in the snapshot. If you instead see [PAGE SNAPSHOT UNAVAILABLE], the extension could not read the tab: say exactly that and suggest opening a normal website tab (or reloading it with F5). Interactive elements carry stable ids like "e12" — use those ids as targets.
 
 FILES FROM THE USER'S DISK: a [PROJECT FILES BRIDGE] message lists files the user attached with the panel's 📎 button (a local folder or files). You have no shell, no git and no direct disk access — never fake command output and never pretend to read files that were not attached. When that message is present, you can publish those files on any site with a web upload: send {"action":"upload", ...} and the extension feeds the real files into the page's file picker. When it is absent and the task needs local files (e.g. "put my project on GitHub"), do the file-free part first (e.g. create the repository) and ask the user to click 📎 and pick the project folder.
 
@@ -51,12 +59,14 @@ Available actions:
 Rules:
 - When the user asks you to DO something on the page (open, play, search, fill, click, upload, publish), you must act with action blocks until it is done. NEVER reply with instructions for the user to do it themselves, and NEVER claim you cannot click/type/navigate.
 - After each action you will receive a [TOOL RESULT] message. Continue step by step until you can answer.
+- TRUTH RULE (absolute): a [TOOL RESULT] starting with "error:" means the action DID NOT RUN — never claim it ran, never say a message was typed or sent, never invent how the page reacted. State the failure plainly, then fix it (send {"action":"read"} for fresh ids and retry). A "type confirmed" result quotes the field's new text — that is the only proof typing worked; a press result says "input cleared after Enter — message submitted" only when the page really submitted. Until you see that exact confirmation, the message is NOT sent — and if retries keep failing, tell the user exactly that instead of pretending success.
+- Stale ids: pages re-render after every click/type — an id from an older snapshot may be gone. On "element not found" the [TOOL RESULT] carries a fresh id list: pick from it immediately (or send {"action":"read"}).
 - "target" accepts a snapshot id (e12) OR a CSS selector like a[href*='name']; "extract" takes a CSS "query" ("selector" also works) and returns ALL matches; navigate accepts relative URLs like /repo-name.
 - Only one action block per reply. You may also write a short plan before the block.
 - When no action is needed, just answer in plain text (markdown allowed).
 - LANGUAGE: always reply in the language the user writes in (Persian → Persian, English → English, etc.). Your very first reply after the user connects must include exactly this line: "Now you can chat in your language".
 - Never submit payments, enter passwords, delete data or send messages on the user's behalf unless the user explicitly asked for exactly that.
-- If the snapshot lacks information you need, use "extract" or "read" rather than guessing.
+- If the snapshot lacks information you need, use "extract" or "read" rather than guessing. BUT if the snapshot (or an earlier [TOOL RESULT]) already contains what you need, answer directly with NO action at all — every action is visible to the user and slows the reply. Do not re-read a page you have already read unless it visibly changed. Prefer the fewest possible steps, and deliver the final answer (plain text or {"action":"done"}) as soon as the goal is met. If you did not actually execute an action block in this turn, never claim you clicked, typed, sent, opened or changed anything — say plainly that you did not.
 
 Example — user: "play Gole Yakh on YouTube":
 I'll search YouTube for it.
@@ -80,6 +90,7 @@ const state = {
   model: DEFAULT_MODEL,
   confirmMode: true,
   autoAttach: true,
+  showStatus: false, // retry/captcha chatter hidden by default (was flooding the chat)
   chatId: "", // client-generated UUID; materializes on chat.z.ai with first message
   chatTitle: "New chat",
   messages: [], // {role, content}
@@ -89,9 +100,12 @@ const state = {
   abort: null,
   captchaToken: "", // fresh aliyun captcha payload, consumed by the next request
   captchaNeeded: false, // set when the server demands a captcha; while set, a fresh
-                        // token is solved before each attempt — cleared again as soon
-                        // as a request succeeds (optimistic, like the site: most of
-                        // its own requests go out without a token)
+                        // token is solved before each attempt. 1.0.20: the flag now
+                        // survives successes for a 10-minute quiet window — requests
+                        // carry a token so the server stops re-demanding (the old
+                        // optimistic clear made EVERY new message trigger a demand,
+                        // a captcha solve and a tab focus steal again)
+  captchaDemandedAt: 0, // last time the server demanded a captcha (ms epoch)
   fileBridge: [] // 📎 files attached from the user's disk: {path, size, text, file}
 };
 
@@ -127,6 +141,90 @@ function mdLite(s) {
       : m;
   });
   return out.replace(/\n/g, "<br/>");
+}
+
+/* ── native MCP tool-call hygiene ─────────────────────────────────────── */
+function stripGlmBlocks(s) {
+  const src = String(s == null ? "" : s);
+  let out = src.replace(STRIP_GLM_RE, "").replace(/<\/?glm_block[^>]*>/gi, "");
+  // Some streams emit only the closing tag plus the result object.
+  if (/mcp_server|display_result|"type"\s*:\s*"mcp"/i.test(src)) {
+    out = out
+      .split("\n")
+      .filter(
+        (l) =>
+          !/"(?:mcp_server|display_result|is_error|result|status|duration|type)"\s*:/i.test(l) &&
+          !/^\s*[}\],]+\s*$/.test(l)
+      )
+      .join("\n");
+  }
+  return out.replace(/^\s*[\u200b-\u200d\ufeff]+\s*$/gm, "").trim();
+}
+
+// Turn a native <glm_block> mcp_server call into a real extension action.
+// Result-only blocks (no usable parameters) are ignored.
+function parseNativeMcpAction(text) {
+  let src = String(text || "");
+  // Some streams deliver only the result JSON plus a stray closing tag (no
+  // opening <glm_block>). Wrap it so the same parser handles that shape.
+  if (!/<glm_block/i.test(src) && /"mcp_server"\s*:/i.test(src)) {
+    src = "<glm_block>" + src + "</glm_block>";
+  }
+  const re = /<glm_block[^>]*>([\s\S]*?)<\/glm_block>/gi;
+  let m;
+  while ((m = re.exec(src))) {
+    const inner = m[1].trim();
+    let obj = null;
+    try { obj = JSON.parse(inner); } catch {}
+    if (!obj || typeof obj !== "object") obj = tryParseActionJSON(inner);
+    if (!obj || typeof obj !== "object") continue;
+    const srv = obj.mcp_server || obj.server || {};
+    const name = String(srv.name || obj.name || obj.tool || obj.tool_name || "");
+    let args = srv.arguments || srv.args || obj.arguments || obj.args || {};
+    if (typeof args === "string") {
+      const parsed = tryParseActionJSON(args);
+      args = parsed && typeof parsed === "object" ? parsed : {};
+    }
+    // Observed malformed shape: name = "action_click\ntarget=e37</arg_value>"
+    if (!Object.keys(args).length && /action_/i.test(name)) {
+      const kv = {};
+      const cleaned = name.replace(/<\/?arg_value>/gi, " ");
+      const kre = /([A-Za-z_][\w-]*)\s*=\s*("[^"]*"|'[^']*'|[^\s]+)/g;
+      let km;
+      while ((km = kre.exec(cleaned))) kv[km[1]] = km[2].replace(/^["']|["']$/g, "");
+      args = kv;
+    }
+    const am = name.match(/action_([A-Za-z_]+)/i);
+    if (!am) continue;
+    const action = am[1].toLowerCase();
+    if (!["click","type","press","scroll","extract","read","navigate","upload","done"].includes(action)) continue;
+    const out = { action };
+    for (const k of ["target","selector","element","text","key","direction","query","css","url","link","href","files"])
+      if (args[k] !== undefined) out[k] = args[k];
+    if (action === "click" && !out.target && !out.selector && !out.element) continue;
+    if (action === "type" && typeof out.text !== "string") continue;
+    if (action === "navigate" && !out.url && !out.link && !out.href) continue;
+    return out;
+  }
+  return null;
+}
+
+// Retry/captcha/WAF chatter becomes ONE updating line (or is hidden).
+let liveStatusEl = null;
+function setStatus(text) {
+  if (!state.showStatus) { console.debug("[Sidebar Agent] " + text); return; }
+  try {
+    if (!liveStatusEl || !liveStatusEl.isConnected) {
+      liveStatusEl = addMsgEl("tool", text);
+    } else {
+      liveStatusEl.textContent = text;
+      $("chatLog").scrollTop = $("chatLog").scrollHeight;
+    }
+  } catch {}
+}
+function clearStatus() {
+  if (liveStatusEl && liveStatusEl.isConnected) liveStatusEl.remove();
+  liveStatusEl = null;
 }
 
 function toast(msg, ms = 3500) {
@@ -352,11 +450,13 @@ async function streamCompletionOnce({ messages, chatId, onDelta, signal }) {
   }
 
   // The server accepted this request → its risk check is satisfied for now.
-  // Clear the demand flag (optimistic mode): the next request goes out
-  // WITHOUT a token, exactly like the site's own traffic. If the server
-  // demands a captcha again, the heal loop in streamCompletion catches it
-  // and solves a fresh token.
-  state.captchaNeeded = false;
+  // 1.0.20: do NOT clear the demand flag immediately — while we are inside
+  // the 10-minute window since the last demand, keep solving fresh tokens so
+  // every request carries one and the server stops demanding again (each new
+  // demand means a failed request + a captcha solve + a tab focus steal).
+  // After 10 quiet, demand-free minutes go back to optimistic mode, like the
+  // site's own traffic.
+  if (Date.now() - state.captchaDemandedAt > 10 * 60 * 1000) state.captchaNeeded = false;
 
   const reader = res.body.getReader();
   const decoder = new TextDecoder();
@@ -470,11 +570,15 @@ async function getCaptchaToken() {
   try {
     const resp = await chrome.runtime.sendMessage({ type: "GET_ZAI_CAPTCHA" });
     if (resp && resp.ok && resp.captcha) {
-      return { token: resp.captcha, stage: resp.stage || "success" };
+      return { token: resp.captcha, stage: resp.stage || "success", challengeSeen: !!resp.challengeSeen };
     }
-    return { token: "", stage: (resp && (resp.stage || resp.error)) || "no_response" };
+    return {
+      token: "",
+      stage: (resp && (resp.stage || resp.error)) || "no_response",
+      challengeSeen: !!(resp && resp.challengeSeen)
+    };
   } catch {
-    return { token: "", stage: "background_unreachable" };
+    return { token: "", stage: "background_unreachable", challengeSeen: false };
   }
 }
 
@@ -594,21 +698,21 @@ async function streamCompletion(opts) {
   for (let attempt = 1; attempt <= BUDGET.total; attempt++) {
     if (abortedOpt(opts)) throw new Error("aborted by user");
 
-    // captcha still demanded (a demand happened, no success since) → solve a
-    // fresh token BEFORE sending, so the attempt already carries one. The
-    // token is single-use and streamCompletionOnce clears it after every
-    // request — including requests that fail with 503 — so this refill is
-    // what makes capacity→captcha chains heal silently. After a SUCCESS the
-    // flag clears (optimistic mode): the next request goes out without a
-    // token, exactly like the site's own traffic, and only re-solves on a
-    // new demand — the tab stops being yanked to the front on every step.
+    // captcha still demanded (a demand happened recently) → solve a fresh
+    // token BEFORE sending, so the attempt already carries one. The token is
+    // single-use and streamCompletionOnce clears it after every request —
+    // including requests that fail with 503 — so this refill is what makes
+    // capacity→captcha chains heal silently. 1.0.20: the flag stays on for a
+    // 10-minute quiet window after the last demand (see the success path),
+    // so consecutive requests never trigger a fresh demand + focus steal;
+    // after that it clears back to optimistic mode, like the site's own
+    // traffic, and only re-arms on a new demand.
     if (state.captchaNeeded && !state.captchaToken && !emitted) {
       captchaRefills++;
-      addMsgEl(
-        "tool",
+      setStatus(
         captchaRefills === 1
-          ? "🔐 Solving the Z.ai captcha check — your chat.z.ai tab will come to the front for a moment; if a slider appears there, drag it once."
-          : "🔐 The previous request consumed the captcha token — solving a fresh one; your chat.z.ai tab will come to the front for a moment; drag the slider once if it appears."
+          ? "🔐 Solving a fresh Z.ai captcha token — usually silent in the background; the chat.z.ai tab only comes to the front if a slider appears."
+          : "🔐 Refreshing the captcha token for the next request (background solve, usually silent)."
       );
       const solved = await getCaptchaToken();
       if (!solved.token) throw new Error(captchaFailText(solved.stage));
@@ -636,7 +740,8 @@ async function streamCompletion(opts) {
       //    the failed request consumed the previous token
       if (/captcha/i.test(msg) && BUDGET.captcha-- > 0) {
         state.captchaNeeded = true;
-        addMsgEl("tool", "🔐 Z.ai wants a captcha check — bringing your chat.z.ai tab to the front; if a slider appears there, drag it once.");
+        state.captchaDemandedAt = Date.now();
+        setStatus("🔐 Z.ai wants a captcha check — bringing your chat.z.ai tab to the front; if a slider appears there, drag it once.");
         await ensureFeVersion(true);
         const solved = await getCaptchaToken(); // always a fresh solve — never reuse
         if (!solved.token) throw new Error(captchaFailText(solved.stage));
@@ -653,9 +758,9 @@ async function streamCompletion(opts) {
         wafStrikes++;
         if (wafStrikes >= 2 && opts.leanMessages) {
           useLean = true;
-          addMsgEl("tool", "🛡 Still blocked by Z.ai's protection layer — reloading the chat.z.ai tab and retrying with a leaner request (shorter history, no page snapshot)…");
+          setStatus("🛡 Still blocked by Z.ai's protection layer — reloading the chat.z.ai tab and retrying with a leaner request (shorter history, no page snapshot)…");
         } else {
-          addMsgEl("tool", "🛡 Z.ai's protection layer blocked the request — reloading the chat.z.ai tab to lift the block, then retrying…");
+          setStatus("🛡 Z.ai's protection layer blocked the request — reloading the chat.z.ai tab to lift the block, then retrying…");
         }
         await reloadZaiTab();
         await ensureFeVersion(true); // re-touch homepage → fresh cookies in this session too
@@ -671,7 +776,7 @@ async function streamCompletion(opts) {
         const sib = siblingModel(tried);
         if (capStrikes >= 2 && !capSwitched && PREFERRED_MODELS.includes(tried)) {
           capSwitched = true;
-          addMsgEl("tool", `↩ Still at capacity — switching model "${tried}" → "${sib}" and retrying…`);
+          setStatus(`↩ Still at capacity — switching model "${tried}" → "${sib}" and retrying…`);
           state.model = sib;
           const sel = $("modelSelect");
           if ([...sel.options].some((o) => o.value === sib)) {
@@ -682,7 +787,7 @@ async function streamCompletion(opts) {
           }
           saveSettings();
         } else {
-          addMsgEl("tool", `⏳ "${tried}" is at capacity — waiting a few seconds, then retrying…`);
+          setStatus(`⏳ "${tried}" is at capacity — waiting a few seconds, then retrying…`);
         }
         await sleep(3000);
         continue;
@@ -1312,14 +1417,39 @@ async function executeAction(act) {
     cmd = { action: "upload", target: act.target || act.selector || "", files: payloads };
   }
   const res = await callAgent(tabId, cmd);
-  if (res.error) return "[TOOL RESULT] error: " + res.error;
+  if (res.error) {
+    // ids go stale as soon as the page re-renders (even our own clicks swap
+    // DOM nodes). On "not found" fetch a fresh snapshot INLINE so the model's
+    // NEXT step uses valid ids instead of guessing at dead ones.
+    if (/not found/i.test(res.error) && ["click", "type", "press"].includes(act.action)) {
+      const snap = await callAgent(tabId, { action: "read" });
+      if (!snap.error) {
+        state.attached.snapshot = snap;
+        const elems = (snap.elements || [])
+          .slice(0, 30)
+          .map((e) => `- [${e.id}] ${e.desc}`)
+          .join("\n");
+        return (
+          "[TOOL RESULT] error: " + res.error +
+          "\nACTION DID NOT RUN. Fresh ids from a new snapshot of the page:\n" +
+          (elems || "(no interactive elements visible right now)")
+        );
+      }
+    }
+    return "[TOOL RESULT] error: " + res.error;
+  }
 
   switch (act.action) {
     case "click":
-    case "type":
-    case "press":
     case "scroll":
       return `[TOOL RESULT] ${act.action} ok. Page title: ${res.title || state.attached.title}` +
+        (res.notice ? ` (${res.notice})` : "");
+    case "type":
+      // verified result: the text is REALLY in the field now (read back)
+      return `[TOOL RESULT] type confirmed — the field now holds ${res.typed} chars: "${res.preview || ""}"` +
+        `. Page title: ${res.title || state.attached.title}`;
+    case "press":
+      return `[TOOL RESULT] press ok. Page title: ${res.title || state.attached.title}` +
         (res.notice ? ` (${res.notice})` : "");
     case "extract":
       return "[TOOL RESULT]\n" + String(res.text || "").slice(0, 3000);
@@ -1343,7 +1473,28 @@ async function executeAction(act) {
 function addMsgEl(kind, text) {
   const div = document.createElement("div");
   div.className = "msg msg-" + kind;
-  div.innerHTML = kind === "user" || kind === "assistant" ? mdLite(text) : esc(text);
+  if (kind === "tool") {
+    const t = String(text);
+    const isStatus = /^(🔐|🛡|📎|🔁|↩|\[stopped|\[unparseable)/.test(t);
+    if (!isStatus) {
+      // raw [TOOL RESULT] / step output — collapsed one-liner, click to expand
+      const d = document.createElement("details");
+      d.className = "tool-fold";
+      const summary = document.createElement("summary");
+      const head = t.split("\n")[0].replace(/\s+/g, " ").trim();
+      summary.textContent = head.length > 90 ? head.slice(0, 90) + " …" : head;
+      const body = document.createElement("div");
+      body.className = "tool-body";
+      body.textContent = t;
+      d.appendChild(summary);
+      d.appendChild(body);
+      div.appendChild(d);
+    } else {
+      div.innerHTML = esc(t); // short status announcements stay visible
+    }
+  } else {
+    div.innerHTML = kind === "user" || kind === "assistant" ? mdLite(text) : esc(text);
+  }
   $("chatLog").appendChild(div);
   $("chatLog").scrollTop = $("chatLog").scrollHeight;
   return div;
@@ -1406,6 +1557,8 @@ async function send() {
   try {
     let steps = 0;
     let nudges = 0; // self-heal attempts for malformed action blocks
+    let executedThisTurn = 0;
+    let claimNudged = false;
     let lastReply = "";
     while (steps < MAX_AGENT_STEPS) {
       steps++;
@@ -1433,14 +1586,17 @@ async function send() {
           }
           if (cDelta) {
             bubble._raw = (bubble._raw || "") + cDelta;
-            bubble.innerHTML = mdLite(bubble._raw);
+            // never show Z.ai's raw native tool-call / result JSON
+            bubble.innerHTML = mdLite(stripGlmBlocks(bubble._raw) || "…");
           }
           $("chatLog").scrollTop = $("chatLog").scrollHeight;
         }
       });
 
       bubble.classList.remove("cursor-blink");
-      if (!bubble._raw) bubble._raw = content || "(empty reply)";
+      const rawContent = String(content || bubble._raw || "");
+      const visibleContent = stripGlmBlocks(rawContent);
+      bubble._raw = visibleContent || "(empty reply)";
       bubble.innerHTML = mdLite(bubble._raw);
       if (reasoning && !thinkEl) {
         thinkEl = document.createElement("details");
@@ -1449,11 +1605,38 @@ async function send() {
         $("chatLog").insertBefore(thinkEl, bubble);
       }
 
-      state.messages.push({ role: "assistant", content });
-      lastReply = content;
-
-      const act = parseAction(content);
-      if (!act) break; // plain answer — done
+      // Native <glm_block> calls never really run on Z.ai's side. Parse them
+      // here and execute them for real instead of letting the model pretend
+      // it succeeded on an empty tool result.
+      let nativeAct = null;
+      let act = parseAction(rawContent);
+      if (!act) {
+        nativeAct = parseNativeMcpAction(rawContent);
+        act = nativeAct;
+      }
+      if (nativeAct) {
+        bubble._raw = "⚙ " + nativeAct.action + " — running in the page…";
+        bubble.innerHTML = mdLite(bubble._raw);
+      }
+      // Keep the model's own history coherent: it "said" an action block,
+      // then receives the [TOOL RESULT] of the action we really executed.
+      const storedContent = nativeAct
+        ? "```action\n" + JSON.stringify(nativeAct) + "\n```"
+        : visibleContent;
+      state.messages.push({ role: "assistant", content: storedContent });
+      lastReply = visibleContent;
+      if (!act) {
+        if (!claimNudged && executedThisTurn === 0 && ACTION_CLAIM_RE.test(visibleContent)) {
+          claimNudged = true;
+          state.messages.push({
+            role: "user",
+            content:
+              "[SYSTEM] No action block was executed in this turn, so you did NOT click, type, send, open or change anything on the page. Either emit the required ```action block now, or correct your reply and state plainly that you did not perform the action."
+          });
+          continue;
+        }
+        break; // plain answer — done
+      }
       if (act.action === "error") {
         console.warn("[Sidebar Agent] unparseable action block:", act.raw);
         if (nudges < 2 && !state.abort.signal.aborted) {
@@ -1482,6 +1665,7 @@ async function send() {
       }
 
       const result = await executeAction(act);
+      if (!/^\[TOOL RESULT\] error:/.test(result)) executedThisTurn++;
       addMsgEl("tool", result.length > 400 ? result.slice(0, 400) + " …" : result);
       state.messages.push({ role: "user", content: result });
     }
@@ -1496,6 +1680,7 @@ async function send() {
       addMsgEl("error", "⚠ " + (e.message || e));
     }
   } finally {
+    clearStatus();
     state.busy = false;
     $("btnSend").disabled = false;
     $("btnStop").classList.add("hidden");
@@ -1512,7 +1697,7 @@ function buildLlmMessages(lean = false) {
   msgs.push({
     role: "assistant",
     content:
-      "I am the browser-automation agent in your side panel. My only tools are real ```action blocks — click / type / press / scroll / extract / navigate / upload / done — and the extension executes them in the active tab. I have no web_search or WebFetch and no shell. When you ask me to do something on the page, I act step by step; I never tell you to do it yourself and never expose my private reasoning."
+      "I am the browser-automation agent in your side panel. My only tools are real ```action blocks — click / type / press / scroll / extract / navigate / upload / done — and the extension executes them in the active tab. I have no web_search or WebFetch and no shell. I never use Z.ai's native <glm_block>/mcp_server tools — they are not connected to this tab. When you ask me to do something on the page, I act step by step; I never tell you to do it yourself and never expose my private reasoning."
   });
   if (state.attached && state.attached.snapshot) {
     if (lean) {
@@ -1610,7 +1795,8 @@ function saveSettings() {
     JSON.stringify({
       model: state.model,
       confirmMode: state.confirmMode,
-      autoAttach: state.autoAttach
+      autoAttach: state.autoAttach,
+      showStatus: state.showStatus
     })
   );
 }
@@ -1621,9 +1807,11 @@ function loadSettings() {
     if (s.model) state.model = s.model;
     if (typeof s.confirmMode === "boolean") state.confirmMode = s.confirmMode;
     if (typeof s.autoAttach === "boolean") state.autoAttach = s.autoAttach;
+    if (typeof s.showStatus === "boolean") state.showStatus = s.showStatus;
   } catch {}
   $("confirmMode").checked = state.confirmMode;
   $("autoAttach").checked = state.autoAttach;
+  $("showStatus").checked = state.showStatus;
   $("modelCustom").value = "";
 }
 
@@ -1708,6 +1896,10 @@ document.addEventListener("DOMContentLoaded", async () => {
   };
   $("autoAttach").onchange = (e) => {
     state.autoAttach = e.target.checked;
+    saveSettings();
+  };
+  $("showStatus").onchange = (e) => {
+    state.showStatus = e.target.checked;
     saveSettings();
   };
   $("btnSaveToken").onclick = () => {
