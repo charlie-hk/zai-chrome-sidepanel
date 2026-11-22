@@ -1,80 +1,64 @@
 # Privacy Policy — Sidebar Agent for Z.ai
 
-_Last updated: November 10, 2026_
+_Last updated: November 22, 2026_
 
 ## Overview
 
-Sidebar Agent for Z.ai ("the extension") is a browser extension that adds
-an AI assistant side panel connected to the user's own chat.z.ai account.
-The developer does **not** operate any server, does **not** collect or
-store any user data outside the user's own browser, and does **not**
-receive copies of anything the extension processes.
+Sidebar Agent for Z.ai ("the extension") adds an AI assistant side panel that
+uses the user's own Z.ai API key. The developer does **not** operate any
+server, does **not** collect or store user data outside the user's own
+browser, and does **not** receive copies of anything the extension processes.
 
 ## Data stored on your device
 
-The extension is local-first. While you are connected, your chat.z.ai
-session token is held in the side panel's **memory** only; it is not
-written to disk and it disappears when the panel or the browser closes.
-Additionally, the side panel's own local storage inside your browser (an
-extension-scoped area readable only by this extension) may hold:
+The side panel's local storage (an extension-scoped area readable only by this
+extension) may hold:
 
-- A session token **you pasted manually** — saved until Connect succeeds
-  or until you press **Disconnect**.
-- Your settings (e.g., model choice, confirmation mode).
-- Your panel conversation history lives in the panel's memory for the
-  current session only; **Clear chat** (or **New chat**) removes it
-  immediately.
+- Your **Z.ai API key**, until you remove it (save an empty field in
+  Settings → Advanced) or press **Disconnect**.
+- Your settings (model choice, confirmation mode and similar switches).
 
-This data never leaves your machine except as described below, is never
-sold, and is removed when you uninstall the extension or press
-**Disconnect** in the Settings drawer.
+The conversation shown in the panel lives in memory only; **Clear chat** or
+**New chat** removes it. Everything is removed when you uninstall the extension.
 
 ## Data sent over the network
 
-When you use the panel, the extension sends requests **only** to
-`chat.z.ai`:
+The extension sends requests **only** to `api.z.ai` (the official Z.ai API):
 
-- Your question, plus — if you attached the current tab — the visible
-  text of that page, is sent to chat.z.ai so the AI can answer.
-- Your session token is sent in the request headers to authenticate as
-  you.
-- Page actions you approve (clicks, typing, scrolling) are performed
-  locally in the page; only page text relevant to your request is sent
-  to chat.z.ai.
+- Your messages and, if the current tab is attached, the visible text and the
+  list of clickable elements of that page, so the model can answer.
+- Your API key, in the request header, to authenticate as you.
+- Results of actions you approved (for example the page text after a click).
 
-The extension communicates with no other servers, sends nothing on its
-own initiative, and contains no analytics, no advertising, no tracking
-and no logging service. It never fetches, injects or executes remotely
-hosted code in any context (extension pages or web pages).
+Clicks, typing and scrolling are performed locally in your tab. The extension
+sends nothing on its own initiative and contains no analytics, advertising,
+tracking or logging service. It never fetches, injects or executes remotely
+hosted code.
 
-## Captcha verification
+## Setting up your API key (only when you approve)
 
-When chat.z.ai requires a verification, the extension operates the
-verification widget **that the chat.z.ai page itself has loaded** inside
-your own chat.z.ai tab — the same widget the official web app uses on
-every message send. The verification result is attached only to your
-request to chat.z.ai. The extension never sends anything to the
-verification provider or any other party.
+When you press **Connect** and approve the prompt, the extension opens your own
+Z.ai API-keys page, presses the page's "Create API Key" button, reads the new
+key that the page displays, and stores it as described above. It reads nothing
+else from that page. You can delete the key on that page at any time.
 
 ## Third parties
 
-The only third-party service involved is Z.ai (chat.z.ai), which receives
-your prompts and page text because you are using your own account there.
-Their handling of that data is governed by Z.ai's own privacy policy.
+The only third party is Z.ai, which receives your prompts and page text because
+you use your own account and key. Its handling of that data is governed by
+Z.ai's own privacy policy.
 
 ## Your control
 
-- **Disconnect** (Settings) removes the saved token and disconnects the
-  panel from your Z.ai account.
-- **Clear chat** (Settings) removes the panel's conversation history.
-- Uninstalling the extension removes all locally stored data.
+- **Disconnect** removes the saved API key.
+- **Clear chat** removes the panel's conversation.
+- Uninstalling removes all locally stored data.
 
 ## Contact
 
-This extension is developed and maintained by **A.Amini**. For questions
-or concerns about this policy, use the support email shown on the Chrome
-Web Store listing.
+Developed and maintained by **A.Amini**. For questions about this policy, use
+the support email on the Chrome Web Store listing.
 
 ---
 
-© 2026 A.Amini — creator & owner of Sidebar Agent for Z.ai. All rights reserved.
+© 2026 A.Amini. All rights reserved.

@@ -8,8 +8,8 @@
 (function () {
   if (window.__zaiAgent) return;
 
-  const MAX_TEXT = 7000;
-  const MAX_ELEMENTS = 80;
+  const MAX_TEXT = 5000;
+  const MAX_ELEMENTS = 60;
 
   let idCounter = 0;
 
@@ -86,9 +86,78 @@
     };
   }
 
+  // Models rarely send "e12" exactly. They send ref/id, the element's id
+  // attribute, or a human label such as "Start a post button". All of these
+  // must land on the same element, or the agent burns its whole step budget on
+  // "element not found".
+  const GENERIC_WORDS = new Set(["button", "btn", "link", "field", "input", "box", "icon",
+    "element", "item", "tab", "area", "section", "the", "a", "an"]);
+
+  const tokenize = (value) => String(value || "")
+    .toLowerCase()
+    .split(/[^\p{L}\p{N}]+/u)
+    .filter(Boolean);
+
+  function normLabel(value) {
+    return String(value || "")
+      .toLowerCase()
+      .replace(/["'“”‘’]/g, "")
+      .replace(/\s+/g, " ")
+      .trim();
+  }
+
+  function accessibleName(el) {
+    return normLabel([
+      el.getAttribute("aria-label"),
+      el.getAttribute("placeholder"),
+      el.getAttribute("title"),
+      el.getAttribute("name"),
+      el.getAttribute("alt"),
+      el.getAttribute("value"),
+      el.id,
+      el.innerText || el.textContent || ""
+    ].filter((v) => typeof v === "string" && v.trim()).join(" | "));
+  }
+
+  function findByLabel(raw) {
+    const wanted = normLabel(raw);
+    const wantedTokens = tokenize(wanted).filter((t) => !GENERIC_WORDS.has(t));
+    if (!wantedTokens.length) return null;
+    const wantedCore = wantedTokens.join(" ");
+    const pool = Array.from(document.querySelectorAll(
+      "a[href],button,input,textarea,select,[role=button],[role=link],[role=tab],[contenteditable=true]"
+    )).filter(isVisible);
+    const scored = [];
+    for (const el of pool) {
+      const name = accessibleName(el);
+      if (!name) continue;
+      const nameTokens = tokenize(name);
+      const set = new Set(nameTokens);
+      let score = 0;
+      if (name === wanted) score = 100;
+      else if (name === wantedCore) score = 90;
+      else if (name.startsWith(wanted) || name.startsWith(wantedCore)) score = 80;
+      else if (wantedTokens.length >= 2 && wantedTokens.every((t) => set.has(t))) score = 60;
+      else if (wantedTokens.length === 1 && nameTokens.length <= 2 && set.has(wantedTokens[0])) score = 50;
+      if (score) scored.push({ el, score });
+    }
+    if (!scored.length) return null;
+    scored.sort((a, b) => b.score - a.score);
+    const best = scored.filter((s) => s.score === scored[0].score);
+    if (best.length === 1) return best[0].el;
+    const listed = best.slice(0, 4).map((s) => {
+      const id = s.el.getAttribute("data-zai-id");
+      return describe(s.el) + (id ? " [" + id + "]" : "");
+    });
+    throw new Error(
+      'target "' + raw + '" matches ' + best.length + " elements: " + listed.join("; ") +
+      ". Send the id of the one you mean."
+    );
+  }
+
   function findTarget(id) {
-    // snapshot ids are "e12"-style; models also often send a CSS selector
-    // directly ("a[href*='foo']") — accept both
+    // snapshot ids are "e12"-style; models also send a CSS selector, a label,
+    // or the description from the snapshot — accept all of them
     const raw = String(id == null ? "" : id).trim();
     if (raw) {
       const el = document.querySelector(`[data-zai-id="${CSS.escape(raw)}"]`);
@@ -99,12 +168,14 @@
           const sel = document.querySelector(raw);
           if (sel) return sel;
         } catch {}
+        const byLabel = findByLabel(raw);
+        if (byLabel) return byLabel;
       }
     }
     throw new Error(
       "element \"" + (raw || "undefined") + "\" not found — send a target from the " +
-      "snapshot (e.g. e12) or a CSS selector like a[href*='name']; " +
-      "send action \"read\" first for a fresh snapshot"
+      "snapshot (e.g. e12), a CSS selector like a[href*='name'], or the visible " +
+      'label like "Start a post"; send action "read" first for a fresh snapshot'
     );
   }
 
@@ -117,8 +188,29 @@
   // type/press verification the model reports to the user
   function readVal(el) {
     if (!el) return "";
-    if (el.isContentEditable) return String(el.innerText || el.textContent || "");
-    return String(el.value == null ? "" : el.value);
+    if (!el.isContentEditable) return String(el.value ?? "");
+    // Chrome represents Enter as a block and an empty line as <div><br>.
+    // innerText can count that empty line twice; read the editor structure
+    // without collapsing text, trimming lines, or overlooking truncation.
+    const isBlock = (node) => node.nodeType === Node.ELEMENT_NODE && /^(DIV|P|LI|PRE|BLOCKQUOTE)$/.test(node.tagName);
+    const read = (node) => {
+      if (node.nodeType === Node.TEXT_NODE) return node.nodeValue;
+      if (node.nodeType !== Node.ELEMENT_NODE) return "";
+      if (node.tagName === "BR") return "\n";
+      const children = [...node.childNodes];
+      if (children.length === 1 && children[0].nodeName === "BR") return "";
+      let out = "", blockBefore = false, hasPart = false;
+      for (const child of children) {
+        if (child.nodeType !== Node.TEXT_NODE && child.nodeType !== Node.ELEMENT_NODE) continue;
+        const isLine = isBlock(child);
+        if (hasPart && (isLine || blockBefore)) out += "\n";
+        out += read(child);
+        hasPart = true;
+        blockBefore = isLine;
+      }
+      return out;
+    };
+    return read(el);
   }
 
   function sleep(ms) {
@@ -131,100 +223,54 @@
     },
     click(cmd) {
       const el = findTarget(cmd.target || cmd.selector || cmd.element);
+      if (!isVisible(el) || el.matches(':disabled, [aria-disabled="true"]')) throw new Error("The click target is hidden or disabled.");
       el.scrollIntoView({ block: "center" });
       el.click();
       return { ok: true, title: document.title };
     },
     async type(cmd) {
-      if (typeof cmd.text !== "string") throw new Error("type requires text");
+      if (typeof cmd.text !== "string" || !cmd.text.trim()) throw new Error("type requires the complete text");
       const el = findTarget(cmd.target || cmd.selector || cmd.element);
+      const editable = el.isContentEditable && !el.parentElement?.isContentEditable;
+      const plain = el instanceof HTMLTextAreaElement ||
+        (el instanceof HTMLInputElement && ["text", "search", "url", "tel", "email"].includes(el.type));
+      if ((!editable && !plain) || el.disabled || el.readOnly || !isVisible(el)) throw new Error("Choose a visible, writable text field or editor.");
+      const expected = cmd.text.replace(/\r\n?/g, "\n");
+      if (el instanceof HTMLInputElement && expected.includes("\n")) throw new Error("This is a single-line input; choose the multiline editor.");
       el.scrollIntoView({ block: "center" });
       el.focus();
-      if (el.isContentEditable) {
-        // rich editors (Lexical/Slate/ProseMirror/React) ignore direct
-        // textContent writes — execCommand walks the real editing pipeline
-        let exec = false;
-        try {
-          exec =
-            document.execCommand("selectAll", false, null) &&
-            document.execCommand("insertText", false, cmd.text);
-        } catch {}
-        if (!exec) {
-          el.textContent = cmd.text;
-          fireInput(el);
-        }
+      if (editable) {
+        // Select only this editor. Editing through Chrome fires input events
+        // used by editor frameworks and preserves paragraph breaks.
+        if (document.activeElement !== el) throw new Error("Chrome could not focus the selected editor.");
+        const range = document.createRange();
+        range.selectNodeContents(el);
+        const selection = window.getSelection();
+        selection.removeAllRanges();
+        selection.addRange(range);
+        if (!document.execCommand("insertText", false, expected)) throw new Error("This editor did not accept the text; paste the draft manually.");
       } else {
-        // React-friendly: use the native setter so frameworks notice
-        // (FIX 1.0.20: this used the undefined variable `text` — a strict-mode
-        // ReferenceError — so typing into ANY <input>/<textarea> failed)
-        const proto =
-          el.tagName === "TEXTAREA" ? HTMLTextAreaElement.prototype : HTMLInputElement.prototype;
-        const setter = Object.getOwnPropertyDescriptor(proto, "value").set;
-        if (!setter)
-          throw new Error(
-            "target is not a typeable input/textarea/contenteditable — pick an input from the snapshot"
-          );
-        setter.call(el, cmd.text);
+        const proto = el instanceof HTMLTextAreaElement ? HTMLTextAreaElement.prototype : HTMLInputElement.prototype;
+        Object.getOwnPropertyDescriptor(proto, "value").set.call(el, expected);
         fireInput(el);
       }
-      // VERIFY: read the value back — a page can silently reject or clear
-      // what we typed. Without this the model would claim success on a fail.
       await sleep(150);
-      const now = readVal(el);
-      if (!now.replace(/\s+/g, "").length)
-        throw new Error(
-          "typed, but the field is still empty — the page rejected the text " +
-          "(some editors only accept real keystrokes): click the field first, then retry"
-        );
-      return {
-        ok: true,
-        title: document.title,
-        typed: now.length,
-        preview: now.slice(0, 60)
-      };
+      const now = readVal(el).replace(/\r\n?/g, "\n");
+      if (!el.isConnected || now !== expected) {
+        throw new Error("The editor did not keep the complete text. Do not submit; review the draft in the page.");
+      }
+      return { ok: true, title: document.title, typed: now.length, preview: now.slice(0, 60) };
     },
     async press(cmd) {
       const k = String(cmd.key || "Enter");
-      let el = null;
-      try {
-        const t = cmd.target || cmd.selector || cmd.element;
-        el = t ? findTarget(t) : document.activeElement || document.body;
-      } catch {
-        el = document.activeElement || document.body;
-      }
-      if (el && el.focus) el.focus();
-      const before = readVal(el);
+      const el = findTarget(cmd.target || cmd.selector || cmd.element);
+      el.focus();
       const init = { key: k, bubbles: true, cancelable: true };
       if (k === "Enter") { init.code = "Enter"; init.keyCode = 13; init.which = 13; }
-      el.dispatchEvent(new KeyboardEvent("keydown", init));
-      el.dispatchEvent(new KeyboardEvent("keypress", init));
+      const proceed = el.dispatchEvent(new KeyboardEvent("keydown", init));
+      if (proceed) el.dispatchEvent(new KeyboardEvent("keypress", init));
       el.dispatchEvent(new KeyboardEvent("keyup", init));
-      // some sites only react to a real form submit — fall back once, but
-      // only if the synthetic key didn't navigate already
-      if (k === "Enter") {
-        let form = null;
-        try { form = el.closest ? el.closest("form") : null; } catch {}
-        if (form) {
-          const hrefBefore = location.href;
-          setTimeout(() => {
-            try {
-              if (location.href === hrefBefore && form.requestSubmit) form.requestSubmit();
-            } catch {}
-          }, 250);
-        }
-      }
-      // VERIFY: a chat/search input that emptied itself after Enter means the
-      // page really submitted; text still sitting there means it did NOT.
-      await sleep(350);
-      const after = readVal(el);
-      const had = before.replace(/\s+/g, "").length > 0;
-      const cleared = had && !after.replace(/\s+/g, "").length;
-      const out = { ok: true, title: document.title };
-      if (cleared) out.notice = "input cleared after Enter — message submitted";
-      else if (had)
-        out.notice =
-          "input still holds the text — Enter did NOT submit it; take a fresh read and click the send button instead";
-      return out;
+      return { ok: true, title: document.title, notice: "Submission not verified. Read the page or use the explicit submit button." };
     },
     scroll({ direction }) {
       const map = {
@@ -239,7 +285,10 @@
     extract(cmd) {
       // models oscillate between "query" and "selector" — accept both
       const query = cmd.query || cmd.selector || cmd.css;
-      if (!query) throw new Error('extract requires a CSS query (key "query" — "selector" is accepted too)');
+      if (!query) throw new Error(
+        'extract needs a CSS selector in "query" (e.g. "button[aria-label]"); a "prompt" is not a selector — ' +
+        'use {"action":"read"} to get the page content and its element ids'
+      );
       const els = Array.from(document.querySelectorAll(query));
       if (!els.length) throw new Error("no element matches: " + query);
       // join ALL matches — "extract all repositories" means every one, not
@@ -252,17 +301,17 @@
       return { text, count: els.length };
     },
     navigate(cmd) {
+      // Kept for the side panel's in-tab navigation path: the panel verifies
+      // the destination URL and this only assigns location.href.
       const raw = String(cmd.url || cmd.link || cmd.href || "").trim();
       if (!raw) throw new Error("navigate requires a URL");
       let url;
       try {
-        url = new URL(raw, location.href).href; // relative paths resolve against the current page
+        url = new URL(raw, location.href).href;
       } catch {
         throw new Error("navigate requires a valid URL (got: " + raw + ")");
       }
-      if (!/^https?:/i.test(url)) {
-        throw new Error("navigate only supports http(s) URLs (got: " + url + ")");
-      }
+      if (!/^https?:/i.test(url)) throw new Error("navigate only supports http(s) URLs (got: " + url + ")");
       location.href = url;
       return { ok: true, url };
     },
@@ -280,8 +329,12 @@
       if (sel) {
         try { input = document.querySelector(sel); } catch {}
       }
-      if (!input) input = document.querySelector('input[type="file"]');
-      if (!input)
+      if (!sel) {
+        const inputs = document.querySelectorAll('input[type="file"]');
+        if (inputs.length !== 1) throw new Error("Choose one explicit file input.");
+        input = inputs[0];
+      }
+      if (!(input instanceof HTMLInputElement) || input.type !== "file" || input.disabled)
         throw new Error(
           "no file input on this page — open the site's upload page first " +
           "(e.g. github.com/<owner>/<repo>/upload/main), then retry"
@@ -298,6 +351,7 @@
         dt.items.add(new File([u8], name, { type: f.type || "application/octet-stream" }));
         names.push(name);
       }
+      if (dt.files.length > 1 && !input.multiple) throw new Error("This file input accepts only one file.");
       input.files = dt.files;
       fireInput(input);
       return { ok: true, count: names.length, names, title: document.title };
@@ -309,9 +363,10 @@
   chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
     if (!msg || msg.type !== "ZAI_AGENT_CMD") return;
     const cmd = msg.cmd || {};
-    const fn = handlers[cmd.action];
+    const fn = Object.hasOwn(handlers, cmd.action) ? handlers[cmd.action] : null;
     try {
       if (!fn) throw new Error("unknown action: " + cmd.action);
+      if (cmd.pageUrl && cmd.pageUrl !== location.href) throw new Error("The selected document changed; read the page again.");
       const out = fn(cmd);
       // type/press are async (they verify by reading the value back)
       if (out && typeof out.then === "function") {

@@ -1,90 +1,31 @@
-# Sidebar Agent for Z.ai — User Guide
+# Sidebar Agent for Z.ai — user guide
 
-© 2026 A.Amini — creator & owner. All rights reserved.
+A side panel that can read the page you are on and, with your approval, click,
+type, scroll, open pages and take screenshots. It uses **your own Z.ai API key**.
 
-An unofficial "Claude for Chrome"-style extension for **Z.ai** — a side
-panel next to the page you are browsing, connected to **your own logged-in
-chat.z.ai account**. It reads the page and can click / type / scroll for
-you, always asking before it acts.
+## First start
 
-## Install (Chrome)
+1. Click the extension icon to open the panel, then press **Connect**.
+2. Approve the prompt. The extension opens your Z.ai API-keys page, creates a key
+   and keeps it in this browser. If it cannot (you are not signed in, or the page
+   changed), create a key there yourself and paste it in **⚙ Settings → Advanced →
+   Z.ai API key**.
+3. Ask something. The panel starts on a free model (`glm-4.7-flash`).
 
-1. Extract the `zai-chrome-sidepanel` folder.
-2. Go to `chrome://extensions` in Chrome.
-3. Turn on **Developer mode** (top right).
-4. Click **Load unpacked** and select that folder.
-5. Pin the extension icon and click it — the side panel opens.
+## Good to know
 
-## Connect your account
+- **Free models are shared** and can answer "service overloaded". The panel waits,
+  retries and alternates between the two free models. Paid models need balance on
+  your Z.ai account; if it is empty the panel switches to a free model by itself.
+- **Ask before acting** (Settings) shows every click, typing or upload for approval.
+- Screenshots and "read this page" need a normal http(s) tab, not Chrome's own pages
+  or the Web Store.
+- Closing the panel clears the conversation. **Disconnect** removes the saved key.
 
-1. Open `https://chat.z.ai` in a normal tab and make sure you are logged in.
-2. In the panel, click **Connect** — it picks up the session token your
-   browser already has for chat.z.ai (`localStorage.token`).
-3. The panel greets: **"Now you can chat in your language."** — write in
-   any language and the agent replies in the same one.
-4. If Connect fails: refresh the chat.z.ai tab and retry, or open ⚙
-   Settings and paste the token manually (F12 → Console →
-   `localStorage.token` in the chat.z.ai tab).
-
-## Using the agent
-
-- Ask anything about **the current page** — the panel attaches a live
-  snapshot (visible text + interactive elements with ids like `e12`).
-- Tell it to **act**: "type … and press Enter", "click the first result",
-  "scroll down", "open github.com/…" — the agent replies with action
-  blocks the extension executes for real.
-- **Confirm mode** (default on): every click/type shows an
-  Approve / Skip card first. Turn it off in ⚙ Settings for automatic mode.
-- **Sessions**: the 🗂 button lists your chat.z.ai conversations — resume
-  one or start a new chat; everything appears in your account history too.
-- **🛡 safety rails**: payments, passwords, deleting data and sending
-  messages on your behalf are never done unless you explicitly asked for
-  exactly that.
-
-## 📎 Attach files — publish a local project (e.g. to GitHub)
-
-1. Click **📎** in the composer → **📁 Folder…** (a whole project) or
-   **📄 Files…**. Text files are picked up; `node_modules`, `.git` and
-   binaries are skipped automatically. Right-click 📎 to clear.
-2. Ask for what you want: *"put this project on GitHub"*, *"which file
-   handles the captcha?"*, *"fix the bug in sidepanel.js"* — the agent
-   sees the file tree (and, for small projects, the full contents).
-3. For uploads the agent uses the `upload` action — the real files are
-   handed to the page's own file picker. On GitHub it will create the
-   repository at `github.com/new` and commit folder by folder through the
-   upload pages. Every step still asks for your approval (confirm mode).
-
-## What the status messages mean
+## Messages
 
 | Message | Meaning |
 |---|---|
-| 🔐 Z.ai wants a captcha check… | The server demanded a security check; the extension solves the Aliyun widget in your chat.z.ai tab automatically. If a slider appears there, drag it once. *(Hidden by default in v1.0.21+ — enable in Settings → Show background retry / captcha status.)* |
-| 🔐 Solving the Z.ai captcha check… | Same, pre-solved before the next request. |
-| ⏳ …is at capacity — waiting… | Server-side load; the panel waits and retries, then may switch to the fallback model (glm-5.3 ↔ glm-5.2). *(Hidden by default in v1.0.21+.)* |
-| 🛡 Z.ai's protection layer blocked… | The Aliyun WAF returned a block page; the panel reloads your chat.z.ai tab (this runs the WAF's own check) and retries. *(Hidden by default in v1.0.21+.)* |
-| ✔ Signed build verified (console) | The build is the original, unmodified one signed by A.Amini. *(Legacy — the self-check was disabled in v1.0.21; see note below.)* |
-| ⚠ Build integrity check | **Disabled in v1.0.21.** The legacy ECDSA self-check was disabled to avoid false "modified/corrupted" warnings after the bug-fix patches. No remote code is loaded or executed. |
-
-## Notes
-
-- Unofficial project — it may break when Z.ai changes its site; use it
-  with your own account at your own discretion.
-- Requests go straight from your browser to chat.z.ai. Nothing is sent
-  anywhere else (see `PRIVACY_POLICY.md` in the store package).
-- Developer & rights holder: **A.Amini**.
-
-## What's new
-
-### v1.0.21
-
-- **Green status spam fixed** — captcha, "at capacity" and WAF retry
-  notices no longer flood the chat. They are hidden by default and can
-  be shown as a single collapsible line via **Settings → Show background
-  retry / captcha status**.
-- **Clean chat** — raw `<glm_block>` tool-call JSON is stripped from
-  messages before display, so you see clean text instead of
-  `{"mcp_server":{"name":"action_click…"}}`.
-- **Actions really execute** — the agent can no longer pretend it
-  clicked, typed or sent something. Native MCP calls are parsed and
-  executed for real in the page. If a claim doesn't match what was
-  actually done, the agent is asked to correct itself.
+| Z.ai is busy (HTTP 429), retrying in N s | Shared capacity is full. Wait, or pick a paid model. |
+| No balance for … switching to the free model | Your balance is empty for that model. |
+| The API key was rejected | Key deleted or wrong. Save a new one in Settings → Advanced. |

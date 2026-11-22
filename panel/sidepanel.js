@@ -1,29 +1,43 @@
 // Z.ai Sidepanel Agent — panel logic
-// Talks to chat.z.ai with the user's own logged-in session token
-// (localStorage.token), implements the site's request signing, streams
+// Talks to the official Z.ai API (api.z.ai) with the user's own API key, streams
 // SSE completions, and drives an on-page agent (read/click/type/scroll).
 
 "use strict";
 
 // build marker — verify in DevTools console of the side panel
-console.log("[Sidebar Agent] build 1.0.21 — community fix: native <glm_block> tool calls parsed and executed, raw tool JSON hidden, retry chatter off by default. No remotely hosted code.");
+console.log("[Sidebar Agent] build 1.0.36 - official API only; fewer and smaller requests per task.");
 
 /* ═══════════════════════════ constants ═══════════════════════════ */
 
-const BASE_URL = "https://chat.z.ai";
-const SALT_KEY = "key-@@@@)))()((9))-xxxx&&&%%%%%"; // extracted from the web app bundle
-const DEFAULT_FE_VERSION = "prod-fe-1.1.128";
-// chat.z.ai removed all glm-4.x models — requests with a dead model get
-// HTTP 500, and the first entry of /api/models is "x-preview-l", a
-// captcha-gated preview model that answers with FRONTEND_CAPTCHA_REQUIRED
-// ("Please refresh the page to update the app"). Default to the site's
-// own default model instead, and migrate stale saved selections.
-const DEFAULT_MODEL = "glm-5.3";
-const PREFERRED_MODELS = ["glm-5.3", "glm-5.2"];
-const FALLBACK_MODELS = ["glm-5.3", "glm-5.2", "x-preview-l"];
-const USER_AGENT_PARAM =
-  "Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/120.0.0.0";
-const MAX_AGENT_STEPS = 10;
+// Official Z.ai Open Platform (OpenAI-style) endpoint. Used when the user saves an API key:
+// plain Bearer auth, a system prompt that is honoured, no captcha / signature / WAF dance.
+const API_BASE = "https://api.z.ai/api/paas/v4";
+const API_KEY_URL = "https://z.ai/manage-apikey/apikey-list";
+// Flash ids are taken from third-party reports that Z.ai lists them at $0; the exact ids are unverified,
+// the "Custom model id" box in Settings overrides them.
+// Listed as $0 on docs.z.ai/guides/overview/pricing (checked 2026-11-22 via search results). A new account
+// has no balance, so the paid flagship models fail with HTTP 429 "Insufficient balance".
+const FREE_MODELS = ["glm-4.7-flash", "glm-4.5-flash"];
+const API_MODELS = [...FREE_MODELS, "glm-5.3-flash", "glm-5.3", "glm-5.2", "glm-5.1"];
+const API_DEFAULT_MODEL = FREE_MODELS[0];
+// "temporarily overloaded" (HTTP 429) is a shared-capacity answer, not a bug: wait longer, pace requests,
+// and alternate between the two free models. (The 1 request/second figure for free Flash models comes from a
+// third-party list and is unverified; it is only used to space requests.)
+const API_MAX_ATTEMPTS = 6;
+const API_BACKOFF_MS = [2000, 4000, 8000, 12000, 16000];
+const API_MIN_GAP_MS = 1200;
+let apiLastStart = 0;
+
+function abortableSleep(ms, signal) {
+  return new Promise((resolve, reject) => {
+    if (signal && signal.aborted) return reject(new Error("aborted by user"));
+    const t = setTimeout(() => { if (signal) signal.removeEventListener("abort", onAbort); resolve(); }, ms);
+    const onAbort = () => { clearTimeout(t); reject(new Error("aborted by user")); };
+    if (signal) signal.addEventListener("abort", onAbort, { once: true });
+  });
+}
+const API_IDLE_MS = 60000; // abort a stream that goes silent instead of hanging forever
+const MAX_AGENT_STEPS = 24; // a real LinkedIn post needs ~15 steps: open, read, click, upload, type, post, verify
 
 // chat.z.ai's own backend sometimes streams its built-in browser tools into
 // assistant content as <glm_block>…</glm_block> JSON. In this side panel
@@ -33,11 +47,35 @@ const MAX_AGENT_STEPS = 10;
 const STRIP_GLM_RE = /<glm_block[\s\S]*?<\/glm_block>/gi;
 
 // Used only to catch a model that claims it acted without executing anything.
-const ACTION_CLAIM_RE = /\b(?:i\s+(?:have\s+)?(?:clicked|typed|submitted|sent|navigated|opened|uploaded|played|searched|filled|pressed|scrolled)|done|completed)\b|انجام\s*دادم|کلیک\s*کردم|تایپ\s*کردم|ارسال\s*کردم|باز\s*کردم|جستجو\s*کردم|آپلود\s*کردم|فشار\s*دادم/i;
+const ACTION_CLAIM_RE = /\b(?:i\s+(?:have\s+)?(?:clicked|typed|submitted|sent|navigated|opened|uploaded|played|searched|filled|pressed|scrolled))\b|انجام\s*دادم|کلیک\s*کردم|تایپ\s*کردم|ارسال\s*کردم|باز\s*کردم|جستجو\s*کردم|آپلود\s*کردم|فشار\s*دادم/i;
+
+// Catch the opposite failure: the model denying it has browser control at all
+// ("I only have web search / no browser automation / I cannot click"). GLM
+// drifts back to this when it sees its native tool names, so we correct it.
+const CAPABILITY_DENIAL_RE = new RegExp([
+  // (A) an inability verb tied to a browser action: "I cannot click", "unable to type"
+  String.raw`\b(?:cannot|can'?t|can\s+not|unable\s+to|not\s+able\s+to)\s+(?:\w+\s+){0,2}?(?:click|type|typing|interact|control|access|browse|navigate|upload|screenshot|capture)\b`,
+  // (B) "I don't have a click/type tool", "I don't have access"
+  String.raw`\b(?:don'?t|do\s+not|does\s+not)\s+have\s+(?:a|an|the|any)?\s*(?:direct\s+)?(?:browser\s+)?(?:automation|tools?|ability|access|control|click|typing|type|screenshot)\b`,
+  // (C) "no browser automation", "no tools"
+  String.raw`\bno\s+(?:direct\s+)?(?:browser\s+)?(?:automation|tools?)\b`,
+  // (D) "I can only read / search"
+  // native web-fetch drift: an empty fetch is not a page read
+  String.raw`web\s*fetch[^.!?\n]{0,60}?(?:empty|fail)`,
+  String.raw`empty\s+(?:web\s*)?content`,
+  // Persian
+  String.raw`(?:نمیتونم|نمی\s*تونم|نمیتوانم|نمی\s*توانم)[^.!?\n]{0,30}(?:کلیک|تایپ|وارد|باز|دسترس|اسکرین|آپلود|مرورگر|سایت|صفحه)`,
+  String.raw`نمی\s*شه\s*(?:کلیک|تایپ)`,
+  String.raw`دسترسی\s*(?:به\s*\S+\s*)?ندارم`,
+  String.raw`ابزار(?:ی)?[^.!?\n]{0,25}ندارم`,
+  String.raw`امکان\s*(?:کلیک|تایپ|اجرا)\s*ندارم`,
+  String.raw`محتوای\s*وب\s*خالی|وب\s*فچ`,
+  String.raw`جستجوی\s*وب|اتوماسیون\s*مرورگر|فقط\s*(?:جستجو|خواندن)`
+].join("|"), "i");
 
 const SYSTEM_PROMPT = `You are Z.ai Sidepanel Agent — a browser-automation agent in a Chrome side panel next to the user's active tab. You CONTROL that tab: the extension really executes your action blocks (this is exactly what the user installed you for; risky steps are shown to the user for approval first). You are NOT the plain chat.z.ai assistant.
 
-TOOL REALITY (remember this): the fenced \`\`\`action blocks listed below are your ONLY tools — and the extension really executes them in the tab. You have no other "function list": if you catch yourself reasoning about tools like web_search / WebSearch / WebFetch / a code interpreter, stop — those do not exist in this session, and replies like "I cannot control the browser", "I have no tools" or "I only have web search and page reader" are FALSE here. Also, everything you output is shown to the user verbatim — never expose private deliberation ("Let me think…", self-analysis, capability inventories, meta commentary about the user). Your visible reply is either a one-line plan + one action block, or the final answer in the user's language.\n\nNATIVE Z.AI TOOLS ARE DISCONNECTED HERE: never emit <glm_block>, never call mcp_server tools (action_click, action_type, action_press, …), never print tool-result JSON. Those calls return an empty result, are stripped from the chat and count as a FAILED step. A fenced \`\`\`action block is the ONLY way to act on this tab.\n\nThe user's active browser tab arrives as a [PAGE SNAPSHOT] message — it is not a screenshot, it is the live DOM of that tab. "this page" always means that page; ground every answer about it in the snapshot. If you instead see [PAGE SNAPSHOT UNAVAILABLE], the extension could not read the tab: say exactly that and suggest opening a normal website tab (or reloading it with F5). Interactive elements carry stable ids like "e12" — use those ids as targets.
+TOOL REALITY — READ THIS FIRST, IT OVERRIDES YOUR TRAINING: you are running INSIDE a browser extension, not on the chat.z.ai website. The fenced \`\`\`action blocks listed below are the ONLY interface you have, and the extension really executes them in the user's tab. Clicking, typing, pressing keys, scrolling, navigating and uploading via these blocks WORK — that is the entire purpose of this session. Any instinct that you are a plain web assistant with "web search" or "page reader" tools is WRONG for this session: do not describe your tools, do not say you cannot control the browser, do not say you lack automation. If a task needs the page, USE AN ACTION BLOCK — never narrate your capabilities. Everything you output is shown to the user verbatim — never expose private deliberation or capability inventories. Your visible reply is either a one-line plan + one action block, or the final answer in the user's language.\n\nNEVER emit <glm_block> or call mcp_server tools (action_click, action_type, action_press, …) — those are not connected to this tab, return an empty result, get stripped from the chat and count as FAILED steps. NEVER call a web-fetch / web-search tool either: it returns EMPTY in this session (you have already seen "web content empty") and wastes a step. To read ANY page — including one the user names — use {"action":"navigate","url":...} to open it in the tab, then {"action":"read"} for its content. A fenced \`\`\`action block is the ONLY way to act. WRITE ACTIONS AS A PROPER FENCED BLOCK WITH JSON — never as loose prose like "action navigate url: …" or "action screenshot"; text like that is not an action block.\n\nThe user's active browser tab arrives as a [PAGE SNAPSHOT] message — it is not a screenshot, it is the live DOM of that tab. "this page" always means that page; ground every answer about it in the snapshot. If you instead see [PAGE SNAPSHOT UNAVAILABLE], the extension could not read the tab: say exactly that and suggest opening a normal website tab (or reloading it with F5). Interactive elements carry stable ids like "e12" — use those ids as targets.
 
 FILES FROM THE USER'S DISK: a [PROJECT FILES BRIDGE] message lists files the user attached with the panel's 📎 button (a local folder or files). You have no shell, no git and no direct disk access — never fake command output and never pretend to read files that were not attached. When that message is present, you can publish those files on any site with a web upload: send {"action":"upload", ...} and the extension feeds the real files into the page's file picker. When it is absent and the task needs local files (e.g. "put my project on GitHub"), do the file-free part first (e.g. create the repository) and ask the user to click 📎 and pick the project folder.
 
@@ -52,7 +90,8 @@ Available actions:
 - {"action":"scroll","direction":"down|up|top|bottom"}       — scroll the page
 - {"action":"extract","query":"css selector"}                — pull innerText of ALL matching elements (joined)
 - {"action":"read"}                                          — request a fresh page snapshot
-- {"action":"navigate","url":"https://…"}                    — open a URL in this tab; the fastest way to search (e.g. YouTube: https://www.youtube.com/results?search_query=…)
+- {"action":"navigate","url":"https://…"}                    — open a URL in the active tab (works even from the New Tab page) and wait for it to load; the result already contains the loaded page, so you can answer from it or click on. Fastest way to search (e.g. YouTube: https://www.youtube.com/results?search_query=…)
+- {"action":"screenshot"}                                    — CAPTURE A REAL IMAGE of the visible page. The image is shown in the chat and attached to the 📎 bridge as screenshot-<time>.png. To place it into a post (e.g. LinkedIn image), next send {"action":"upload","files":["screenshot-<time>.png"],"target":"input[type=file]"}. Chrome cannot capture browser UI / chrome:// pages / DevTools — use a normal website tab.
 - {"action":"upload","files":"all"}                          — feed the 📎-attached files into the current page's file input; "files" may also be an array of paths like ["manifest.json","panel/sidepanel.js"]; optional "target" = CSS selector for the file input
 - {"action":"done","final":"<message for the user>"}         — you are finished; deliver the final answer
 
@@ -61,7 +100,7 @@ Rules:
 - After each action you will receive a [TOOL RESULT] message. Continue step by step until you can answer.
 - TRUTH RULE (absolute): a [TOOL RESULT] starting with "error:" means the action DID NOT RUN — never claim it ran, never say a message was typed or sent, never invent how the page reacted. State the failure plainly, then fix it (send {"action":"read"} for fresh ids and retry). A "type confirmed" result quotes the field's new text — that is the only proof typing worked; a press result says "input cleared after Enter — message submitted" only when the page really submitted. Until you see that exact confirmation, the message is NOT sent — and if retries keep failing, tell the user exactly that instead of pretending success.
 - Stale ids: pages re-render after every click/type — an id from an older snapshot may be gone. On "element not found" the [TOOL RESULT] carries a fresh id list: pick from it immediately (or send {"action":"read"}).
-- "target" accepts a snapshot id (e12) OR a CSS selector like a[href*='name']; "extract" takes a CSS "query" ("selector" also works) and returns ALL matches; navigate accepts relative URLs like /repo-name.
+- "target" accepts a snapshot id (e12), a CSS selector like a[href*='name'], OR the visible label of the element such as "Start a post". Always put the value in "target"; "ref", "id" and "element" are accepted aliases but "target" is the field to use. If two elements share a label the action fails with the candidate ids — pick one id and resend. "extract" takes a CSS "query" ("selector" also works) and returns ALL matches; navigate accepts relative URLs like /repo-name.
 - Only one action block per reply. You may also write a short plan before the block.
 - When no action is needed, just answer in plain text (markdown allowed).
 - LANGUAGE: always reply in the language the user writes in (Persian → Persian, English → English, etc.). Your very first reply after the user connects must include exactly this line: "Now you can chat in your language".
@@ -83,29 +122,20 @@ Step 3 — {"action":"done","final":"…"} with the repo link.`;
 /* ═══════════════════════════ state ═══════════════════════════ */
 
 const state = {
-  token: "",
-  userId: "",
+  token: "", // "api-key" once connected (placeholder: send() only checks that a credential exists)
+  apiKey: "",
   userName: "",
-  feVersion: DEFAULT_FE_VERSION,
-  model: DEFAULT_MODEL,
+  model: API_DEFAULT_MODEL,
   confirmMode: true,
   autoAttach: true,
-  showStatus: false, // retry/captcha chatter hidden by default (was flooding the chat)
-  chatId: "", // client-generated UUID; materializes on chat.z.ai with first message
+  showStatus: true, // one updating line (not a wall) — user sees it is retrying, not hung
+  chatId: "",
   chatTitle: "New chat",
   messages: [], // {role, content}
   attached: null, // {tabId, url, title, snapshot}
   pageNote: null, // why no page snapshot could be attached this turn
   busy: false,
   abort: null,
-  captchaToken: "", // fresh aliyun captcha payload, consumed by the next request
-  captchaNeeded: false, // set when the server demands a captcha; while set, a fresh
-                        // token is solved before each attempt. 1.0.20: the flag now
-                        // survives successes for a 10-minute quiet window — requests
-                        // carry a token so the server stops re-demanding (the old
-                        // optimistic clear made EVERY new message trigger a demand,
-                        // a captcha solve and a tab focus steal again)
-  captchaDemandedAt: 0, // last time the server demanded a captcha (ms epoch)
   fileBridge: [] // 📎 files attached from the user's disk: {path, size, text, file}
 };
 
@@ -235,708 +265,164 @@ function toast(msg, ms = 3500) {
   t._h = setTimeout(() => t.classList.add("hidden"), ms);
 }
 
-function decodeJwtPayload(token) {
-  try {
-    const part = token.split(".")[1];
-    const b64 = part.replace(/-/g, "+").replace(/_/g, "/") + "=".repeat((4 - (part.length % 4)) % 4);
-    return JSON.parse(decodeURIComponent(escape(atob(b64))));
-  } catch {
-    return {};
-  }
-}
-
-async function hmacSha256Hex(keyStr, msgStr) {
-  const enc = new TextEncoder();
-  const key = await crypto.subtle.importKey(
-    "raw",
-    enc.encode(keyStr),
-    { name: "HMAC", hash: "SHA-256" },
-    false,
-    ["sign"]
-  );
-  const sig = await crypto.subtle.sign("HMAC", key, enc.encode(msgStr));
-  return [...new Uint8Array(sig)].map((b) => b.toString(16).padStart(2, "0")).join("");
-}
-
-function b64Utf8(str) {
-  const bytes = new TextEncoder().encode(str);
-  let bin = "";
-  for (let i = 0; i < bytes.length; i += 0x8000) {
-    bin += String.fromCharCode(...bytes.subarray(i, i + 0x8000));
-  }
-  return btoa(bin);
-}
-
-/* ═══════════════════════════ Z.ai client ═══════════════════════════ */
-
-let lastFeCheck = 0;
-async function ensureFeVersion(force) {
-  const now = Date.now();
-  if (!force && now - lastFeCheck < 60000) return; // refresh at most once a minute
-  lastFeCheck = now;
-  try {
-    // credentials: attach the user's real chat.z.ai cookies (session + the
-    // anti-bot cookies Aliyun's WAF sets). Extension fetches default to
-    // credentials "same-origin", which means NO cookies — cookieless requests
-    // get bot-scored and eventually blocked with the Aliyun WAF "405" page.
-    const res = await fetch(BASE_URL + "/", {
-      method: "GET",
-      credentials: "include"
-    });
-    const html = await res.text();
-    const m = html.match(/prod-fe-\d+\.\d+\.\d+/);
-    if (m) state.feVersion = m[0];
-  } catch {
-    /* keep current — an outdated value makes the server answer 426 */
-  }
-}
-
-async function guestToken() {
-  const headers = { "Content-Type": "application/json" };
-  await fetch(BASE_URL + "/api/v1/auths/guest", {
-    method: "POST",
-    headers,
-    credentials: "include",
-    body: "{}"
-  }).catch(() => {});
-  const res = await fetch(BASE_URL + "/api/v1/auths/", {
-    headers,
-    credentials: "include"
-  });
-  if (!res.ok) throw new Error("guest auth failed (" + res.status + ")");
-  const j = await res.json();
-  if (!j.token) throw new Error("no guest token");
-  return j.token;
-}
-
-async function generateZaSignature(prompt) {
-  const tsMs = Date.now();
-  const timestamp = String(tsMs);
-  const requestId = uuid();
-  const bucket = Math.floor(tsMs / 300000);
-  const wKey = await hmacSha256Hex(SALT_KEY, String(bucket));
-  // sorted by key: requestId < timestamp < user_id
-  const sortedPayload = `requestId,${requestId},timestamp,${timestamp},user_id,${state.userId}`;
-  const promptB64 = b64Utf8(prompt.trim());
-  const dataToSign = sortedPayload + "|" + promptB64 + "|" + timestamp;
-  const signature = await hmacSha256Hex(wKey, dataToSign);
-
-  const q = new URLSearchParams({
-    timestamp,
-    requestId,
-    user_id: state.userId,
-    version: "0.0.1",
-    platform: "web",
-    token: state.token,
-    user_agent: USER_AGENT_PARAM,
-    language: "en-US",
-    screen_resolution: "1920x1080",
-    viewport_size: "1920x1080",
-    timezone: "Europe/Paris",
-    timezone_offset: "-60",
-    signature_timestamp: timestamp
-  });
-  return { signature, urlParams: q.toString() };
-}
-
-/**
- * Escape < and > as JSON unicode escapes. The server's JSON parser decodes
- * them back — the model sees byte-identical text — but the raw request body
- * no longer contains XSS-looking byte patterns (e.g. "<script") that page
- * snapshots legitimately contain and the Aliyun WAF in front of chat.z.ai
- * answers with its zh-cn "405" block page.
- */
-function jsonBodySafe(o) {
-  return JSON.stringify(o).replace(/</g, "\\u003c").replace(/>/g, "\\u003e");
-}
-
-/**
- * Stream one completion. `onDelta(reasoningDelta, contentDelta)` per tick.
- * Returns the final {content, reasoning}.
- */
-async function streamCompletionOnce({ messages, chatId, onDelta, signal }) {
-  // sign the last user message
-  let lastUser = "";
-  for (let i = messages.length - 1; i >= 0; i--) {
-    if (messages[i].role === "user") {
-      lastUser =
-        typeof messages[i].content === "string"
-          ? messages[i].content
-          : JSON.stringify(messages[i].content);
-      break;
-    }
-  }
-  const { signature, urlParams } = await generateZaSignature(lastUser);
-  await ensureFeVersion(); // an outdated X-FE-Version gets HTTP 426 "refresh the page"
-
-  // Message ids are client-generated, mirroring the chat.z.ai web app
-  // (prod-fe-1.1.128): id = the new assistant message, session_id = chat id,
-  // current_user_message_id = the user message that triggered this reply.
-  // Omitting "id" makes the backend reject the request with
-  // MISSING_MESSAGE_ID ("message id (id) is required").
-  const body = {
-    stream: true,
-    model: state.model,
-    messages: messages.map((m) => ({ ...m, id: uuid() })),
-    signature_prompt: lastUser.trim(),
-    params: {},
-    features: {
-      enable_thinking: true,
-      flags: [],
-      image_generation: false,
-      web_search: false,
-      auto_web_search: false
-    },
-    variables: {},
-    session_id: chatId,
-    chat_id: chatId,
-    id: uuid(),
-    current_user_message_id: uuid(),
-    current_user_message_parent_id: null,
-    captcha_verify_param: state.captchaToken || ""
-  };
-
-  const res = await fetch(BASE_URL + "/api/v2/chat/completions?" + urlParams, {
-    method: "POST",
-    headers: {
-      "authorization": "Bearer " + state.token,
-      "content-type": "application/json",
-      "X-FE-Version": state.feVersion,
-      "Accept-Language": "en-US,en;q=0.9",
-      "x-region": "overseas",
-      "x-signature": signature
-    },
-    body: jsonBodySafe(body),
-    credentials: "include", // session + WAF cookies, like the site's own XHRs
-    signal
-  });
-
-  // captcha tokens are single-use — whatever we attached was consumed by
-  // this exact request; never let the next one reuse it
-  state.captchaToken = "";
-
-  if (res.status === 401) throw new Error("Session expired — click Connect again.");
-  if (!res.ok) {
-    const txt = await res.text().catch(() => "");
-    // An HTML error page here is the Aliyun WAF/edge block page in front of
-    // chat.z.ai (zh-cn "<title>405</title>" + data-spm marker) — not an app
-    // error. Never dump its HTML into the chat; flag it for the heal loop.
-    // (503 stays out of this branch — an HTML 503 is an edge/capacity page
-    // and belongs to the capacity heal, not the WAF heal.)
-    if (
-      res.status !== 503 &&
-      (/^\s*<!doctype html/i.test(txt) ||
-        /<title>\s*405/i.test(txt) ||
-        /data-spm/i.test(txt))
-    ) {
-      const err = new Error(
-        "Z.ai's protection layer (WAF) blocked this request (HTTP " +
-        res.status + ")."
-      );
-      err.status = res.status;
-      err.waf = true;
-      throw err;
-    }
-    const looksHtml = /^\s*<(?:!doctype|html)/i.test(txt);
-    const err = new Error(
-      "chat.z.ai error " + res.status +
-      (looksHtml
-        ? " — an HTML error page (edge/CDN), not a chat response"
-        : ": " + txt.slice(0, 300))
-    );
-    err.status = res.status;
-    if (res.status === 503 || /at capacity/i.test(txt)) err.capacity = true;
-    throw err;
-  }
-
-  // The server accepted this request → its risk check is satisfied for now.
-  // 1.0.20: do NOT clear the demand flag immediately — while we are inside
-  // the 10-minute window since the last demand, keep solving fresh tokens so
-  // every request carries one and the server stops demanding again (each new
-  // demand means a failed request + a captcha solve + a tab focus steal).
-  // After 10 quiet, demand-free minutes go back to optimistic mode, like the
-  // site's own traffic.
-  if (Date.now() - state.captchaDemandedAt > 10 * 60 * 1000) state.captchaNeeded = false;
-
-  const reader = res.body.getReader();
-  const decoder = new TextDecoder();
-  let buf = "";
-  let raw = ""; // accumulated upstream text (details tags included)
-  let seenContent = "";
-  let seenReasoning = "";
-  let done = false;
-
-  const splitDetails = (s) => {
-    let rb = "", cb = "", rest = s;
-    for (;;) {
-      const idx = rest.indexOf("<details");
-      if (idx < 0) { cb += rest; break; }
-      cb += rest.slice(0, idx);
-      const tagEnd = rest.indexOf(">", idx);
-      if (tagEnd < 0) break;
-      const after = rest.slice(tagEnd + 1);
-      const closeIdx = after.indexOf("</details>");
-      if (closeIdx < 0) { rb += after; break; }
-      rb += after.slice(0, closeIdx);
-      rest = after.slice(closeIdx + "</details>".length);
-    }
-    return { reasoning: rb, content: cb };
-  };
-
-  const cleanReasoning = (s) =>
-    s.replace(/<details[^>]*>/g, "").replace(/<\/details>/g, "")
-      .split("\n").map((l) => l.replace(/^> /, "")).join("\n").trim();
-
-  while (!done) {
-    const { value, done: rdDone } = await reader.read();
-    if (rdDone) break;
-    buf += decoder.decode(value, { stream: true });
-
-    let nl;
-    while ((nl = buf.indexOf("\n")) >= 0) {
-      const line = buf.slice(0, nl).trim();
-      buf = buf.slice(nl + 1);
-      if (!line.startsWith("data: ")) continue;
-      const dataStr = line.slice(6);
-      if (dataStr === "[DONE]") { done = true; break; }
-
-      let j;
-      try { j = JSON.parse(dataStr); } catch { continue; }
-
-      const d = j && j.data;
-      const errObj = (d && d.error) || (j && j.error) || null;
-      if (errObj) {
-        const eCode = String(errObj.error_code || errObj.code || "");
-        const eDetail = String(errObj.detail || errObj.message || "");
-        if (/FRONTEND_CAPTCHA_REQUIRED/i.test(eCode)) {
-          throw new Error(
-            "Z.ai requires a captcha verification for this request " +
-            "(model \"" + state.model + "\") — the extension will try to " +
-            "solve it automatically in your chat.z.ai tab."
-          );
-        }
-        if (/user level/i.test(eDetail)) {
-          throw new Error(
-            'Z.ai: your account level cannot use the model "' + state.model +
-            '". Pick another model in the dropdown (glm-5.3 / glm-5.2).'
-          );
-        }
-        if (eDetail) {
-          const err = new Error("Z.ai: " + eDetail);
-          if (/at capacity/i.test(eDetail) || /CAPACITY/i.test(eCode)) {
-            err.capacity = true;
-          }
-          throw err;
-        }
-      }
-      if (d && d.phase === "done") { done = true; break; }
-
-      if (d) {
-        if (typeof d.edit_content === "string" && d.edit_content) {
-          const idx = typeof d.edit_index === "number" ? d.edit_index : 0;
-          raw = raw.substring(0, idx) + d.edit_content; // JS strings are UTF-16 — matches the web app
-        } else if (typeof d.content === "string" && d.content) {
-          raw = d.content;
-        } else if (typeof d.delta_content === "string" && d.delta_content) {
-          raw += d.delta_content;
-        }
-      }
-
-      const { reasoning, content } = splitDetails(raw);
-      const rDelta = reasoning.startsWith(seenReasoning)
-        ? reasoning.slice(seenReasoning.length)
-        : "";
-      if (rDelta) seenReasoning = reasoning;
-      const cDelta = content.startsWith(seenContent)
-        ? content.slice(seenContent.length)
-        : "";
-      if (cDelta) seenContent = content;
-      if ((rDelta || cDelta) && onDelta) onDelta(rDelta, cDelta);
-    }
-  }
-
-  const { reasoning, content } = splitDetails(raw);
-  return { content: content.trim(), reasoning: cleanReasoning(reasoning) };
-}
-
-/**
- * chat.z.ai now demands an Aliyun captcha token with every completion
- * (captcha_verify_param). The token is domain-bound and single-use, so the
- * background service worker runs the site's own widget (fresh instance per
- * solve, like the site's tR()) inside the user's chat.z.ai tab and returns
- * the success payload + a diagnostic stage.
- */
-async function getCaptchaToken() {
-  try {
-    const resp = await chrome.runtime.sendMessage({ type: "GET_ZAI_CAPTCHA" });
-    if (resp && resp.ok && resp.captcha) {
-      return { token: resp.captcha, stage: resp.stage || "success", challengeSeen: !!resp.challengeSeen };
-    }
-    return {
-      token: "",
-      stage: (resp && (resp.stage || resp.error)) || "no_response",
-      challengeSeen: !!(resp && resp.challengeSeen)
-    };
-  } catch {
-    return { token: "", stage: "background_unreachable", challengeSeen: false };
-  }
-}
-
-function captchaFailText(stage) {
-  const base = 'Z.ai demands a captcha and the automatic solve did not return one';
-  const s = String(stage || "");
-  if (/script_missing|init_failed|init_timeout/.test(s)) {
-    return base + " (the captcha widget could not start in the chat.z.ai tab). " +
-      "Reload chat.z.ai once (F5), make sure you are logged in, then try again.";
-  }
-  if (/timeout_challenge|closed_after_challenge/.test(s)) {
-    return base + " — a verification slider appeared in the chat.z.ai tab but " +
-      "was not solved in time. Switch to the chat.z.ai tab, drag the slider, " +
-      "then try again.";
-  }
-  if (/onClose/.test(s)) {
-    return base + " (the verification popup closed without completing). " +
-      "Try again — if a slider appears in the chat.z.ai tab, drag it once.";
-  }
-  if (/onError|execute_failed/.test(s)) {
-    return base + " (the captcha service errored). Try again in a minute.";
-  }
-  if (/not_logged_in|no_tab/.test(s)) {
-    return base + " — no logged-in chat.z.ai tab was found. Open chat.z.ai, " +
-      "log in, then try the panel again.";
-  }
-  return base + ". Open chat.z.ai in a normal tab (stay logged in), then try the panel again.";
-}
-
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const abortedOpt = (opts) => !!(opts.signal && opts.signal.aborted);
 
-// Reload the user's chat.z.ai tab: a full page load runs the site's own WAF
-// JS challenge (acw_* cookies are computed by obfuscated JS — a plain fetch
-// of the homepage can never execute it) and refreshes every protection
-// cookie. This is the same remedy the final error message suggests, done
-// automatically.
-async function reloadZaiTab() {
+/* ── official API transport ───────────────────────────────────────────── */
+
+function isBalanceError(status, msg) {
+  return status === 429 && /insufficient balance|no resource package|recharge/i.test(String(msg || ""));
+}
+
+function apiErrorText(status, bodyText) {
+  let msg = "";
   try {
-    const tabs = await chrome.tabs.query({ url: "https://chat.z.ai/*" });
-    if (!tabs || !tabs.length) return false;
-    const tab = tabs[0];
-    await chrome.tabs.reload(tab.id);
-    await new Promise((resolve) => {
-      let settled = false;
-      const done = () => {
-        if (settled) return;
-        settled = true;
-        try { chrome.tabs.onUpdated.removeListener(listener); } catch {}
-        resolve();
-      };
-      const listener = (tabId, info) => {
-        if (tabId === tab.id && info.status === "complete") done();
-      };
-      chrome.tabs.onUpdated.addListener(listener);
-      setTimeout(done, 12000); // never hang the heal on a slow tab
-    });
-    await sleep(2000); // let the challenge JS settle
-    return true;
-  } catch {
-    return false;
-  }
+    const j = JSON.parse(bodyText);
+    msg = (j.error && (j.error.message || j.error.code)) || j.message || "";
+  } catch {}
+  if (status === 401 || status === 403)
+    return "The API key was rejected (HTTP " + status + "). Check it in Settings → API key." + (msg ? " Server said: " + msg : "");
+  if (isBalanceError(status, msg))
+    return "Your Z.ai account has no balance for this model. Free models (" + FREE_MODELS.join(", ") + ") need none.";
+  if (status === 429)
+    return "Rate limit or balance problem (HTTP 429)." + (msg ? " Server said: " + msg : " Wait a moment or check your balance on z.ai. If the balance is empty, pick a free Flash model in Settings.");
+  return "API error HTTP " + status + (msg ? ": " + msg : "");
 }
 
-// "Model is currently at capacity" is server-side load — retrying the same
-// model once, then transparently switching to its sibling, fixes most cases.
-function siblingModel(cur) {
-  const prefs = PREFERRED_MODELS.filter((m) => m !== cur);
-  if (prefs.length) return prefs[0];
-  return cur === "glm-5.2" ? "glm-5.3" : "glm-5.2";
+// Parses one SSE text chunk stream into {reasoning, content} deltas. Exported for tests.
+function createSseParser(onEvent) {
+  let buf = "";
+  return (chunk, flush = false) => {
+    buf += chunk;
+    const lines = buf.split(/\r?\n/);
+    buf = flush ? "" : lines.pop();
+    for (const line of flush ? lines.concat(buf ? [buf] : []) : lines) {
+      const t = line.trim();
+      if (!t.startsWith("data:")) continue;
+      const data = t.slice(5).trim();
+      if (!data) continue;
+      onEvent(data);
+    }
+  };
 }
 
-/**
- * Wrapper with self-healing. All heal paths live in ONE bounded retry loop,
- * so chained failures heal instead of surfacing:
- *   captcha → capacity, capacity → captcha (the single-use captcha token is
- *   consumed by every request, including one that 503s), stale FE version →
- *   capacity again, WAF block → lean retry, etc. Each heal type has its own
- *   budget and nothing is retried once text was streamed (no duplicated
- *   output):
- * - stale X-FE-Version (HTTP 426 / "refresh the page") → refresh + retry (1)
- * - FRONTEND_CAPTCHA_REQUIRED → solve a fresh token in the chat.z.ai tab
- *   and retry (up to 3 solves per turn)
- * - after any request succeeds the demand flag clears — the next request
- *   goes out without a token (site-like); a fresh solve only happens on a
- *   new demand or mid-chain after a consumed token
- * - Aliyun WAF block page (HTTP 405 + HTML) → reload the chat.z.ai tab (its
- *   page load runs the site's own WAF JS challenge), refresh cookies, pause,
- *   retry; from the second strike the payload goes lean (up to 3 WAF heals
- *   per turn)
- * - "Model is currently at capacity" (HTTP 503 / SSE error) → wait ~3s,
- *   retry the same model once, then switch to the sibling model
- *   (glm-5.3 ↔ glm-5.2) and retry (up to 3 capacity heals per turn)
- * Every step is announced in the chat so the user sees what happens.
- */
-async function streamCompletion(opts) {
-  let emitted = false;
-  const tracked = opts.onDelta
-    ? (r, c) => { emitted = true; opts.onDelta(r, c); }
-    : undefined;
-  let useLean = false; // WAF retry #2 sends a trimmed payload
-  const run = () =>
-    streamCompletionOnce({
-      ...opts,
-      messages:
-        useLean && opts.leanMessages ? opts.leanMessages() : opts.messages,
-      onDelta: tracked
-    });
-
-  const BUDGET = { stale: 1, captcha: 3, waf: 3, capacity: 3, total: 13 };
-  let capStrikes = 0; // consecutive capacity failures this turn
-  let capSwitched = false; // sibling model already tried
-  let wafStrikes = 0; // WAF block pages seen this turn
-  let captchaRefills = 0; // captcha token refills announced this turn
+async function streamCompletionApi({ messages, onDelta, signal }) {
+  if (!state.apiKey) throw new Error("No API key saved. Open Settings → API key.");
+  const body = {
+    model: state.model || API_DEFAULT_MODEL,
+    stream: true,
+    messages: messages.map((m) => ({ role: m.role, content: m.content }))
+  };
   let lastErr = null;
-
-  for (let attempt = 1; attempt <= BUDGET.total; attempt++) {
-    if (abortedOpt(opts)) throw new Error("aborted by user");
-
-    // captcha still demanded (a demand happened recently) → solve a fresh
-    // token BEFORE sending, so the attempt already carries one. The token is
-    // single-use and streamCompletionOnce clears it after every request —
-    // including requests that fail with 503 — so this refill is what makes
-    // capacity→captcha chains heal silently. 1.0.20: the flag stays on for a
-    // 10-minute quiet window after the last demand (see the success path),
-    // so consecutive requests never trigger a fresh demand + focus steal;
-    // after that it clears back to optimistic mode, like the site's own
-    // traffic, and only re-arms on a new demand.
-    if (state.captchaNeeded && !state.captchaToken && !emitted) {
-      captchaRefills++;
-      setStatus(
-        captchaRefills === 1
-          ? "🔐 Solving a fresh Z.ai captcha token — usually silent in the background; the chat.z.ai tab only comes to the front if a slider appears."
-          : "🔐 Refreshing the captcha token for the next request (background solve, usually silent)."
-      );
-      const solved = await getCaptchaToken();
-      if (!solved.token) throw new Error(captchaFailText(solved.stage));
-      state.captchaToken = solved.token;
-    }
-
+  for (let attempt = 1; attempt <= API_MAX_ATTEMPTS; attempt++) {
+    if (signal && signal.aborted) throw new Error("aborted by user");
+    const ctl = new AbortController();
+    const onAbort = () => ctl.abort();
+    if (signal) signal.addEventListener("abort", onAbort, { once: true });
+    let idle = setTimeout(() => ctl.abort("idle"), API_IDLE_MS);
+    const bump = () => { clearTimeout(idle); idle = setTimeout(() => ctl.abort("idle"), API_IDLE_MS); };
+    let emitted = false;
     try {
-      const r = await run();
-      return r;
+      const gap = apiLastStart + API_MIN_GAP_MS - Date.now();
+      if (gap > 0) await abortableSleep(gap, signal); // pace consecutive agent steps
+      apiLastStart = Date.now();
+      const res = await fetch(API_BASE + "/chat/completions", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: "Bearer " + state.apiKey
+        },
+        body: JSON.stringify(body),
+        signal: ctl.signal
+      });
+      if (!res.ok) {
+        const txt = await res.text().catch(() => "");
+        const err = new Error(apiErrorText(res.status, txt));
+        let m = "";
+        try { const j = JSON.parse(txt); m = (j.error && (j.error.message || j.error.code)) || j.message || ""; } catch {}
+        err.balance = isBalanceError(res.status, m);
+        err.retryable = !err.balance && (res.status === 429 || res.status >= 500);
+        err.status = res.status;
+        const ra = Number(res.headers && res.headers.get && res.headers.get("retry-after"));
+        if (ra > 0 && ra < 120) err.retryAfterMs = ra * 1000;
+        throw err;
+      }
+      let content = "", reasoning = "", failure = null;
+      const feed = createSseParser((data) => {
+        if (data === "[DONE]") return;
+        let j;
+        try { j = JSON.parse(data); } catch { return; }
+        if (j.error) { failure = j.error.message || JSON.stringify(j.error); return; }
+        const d = j.choices && j.choices[0] && j.choices[0].delta;
+        if (!d) return;
+        const r = d.reasoning_content || "";
+        const c = d.content || "";
+        if (r) reasoning += r;
+        if (c) content += c;
+        if (r || c) { emitted = true; if (onDelta) onDelta(r, c); }
+      });
+      const reader = res.body.getReader();
+      const dec = new TextDecoder();
+      for (;;) {
+        const { value, done } = await reader.read();
+        if (done) break;
+        bump();
+        feed(dec.decode(value, { stream: true }));
+      }
+      feed("", true);
+      if (failure) throw new Error("API stream error: " + failure);
+      return { content, reasoning };
     } catch (e) {
+      const aborted = signal && signal.aborted;
+      if (aborted) throw new Error("aborted by user");
+      if (ctl.signal.aborted) e = new Error("No data from the API for " + API_IDLE_MS / 1000 + " s — request cancelled. Send the message again.");
+      if (e.balance && !FREE_MODELS.includes(body.model)) {
+        // empty balance: continue on a free model instead of stopping, and remember the choice
+        const free = FREE_MODELS[0];
+        setStatus("No balance for " + body.model + " — switching to the free model " + free);
+        body.model = free;
+        state.model = free;
+        try { $("modelSelect").value = free; $("modelCustom").value = ""; saveSettings(); } catch {}
+        attempt--; // this was not a real retry
+        continue;
+      }
       lastErr = e;
-      const msg = String((e && e.message) || "");
-      if (emitted || abortedOpt(opts)) throw e; // never duplicate streamed text
-
-      // 1) stale X-FE-Version → refresh + retry
-      const stale =
-        (e.status === 426 || /refresh the page|update the app/i.test(msg)) &&
-        !/captcha/i.test(msg);
-      if (stale && BUDGET.stale-- > 0) {
-        await ensureFeVersion(true);
-        continue;
+      const retryable = !emitted && (e.retryable || /Failed to fetch|NetworkError|network/i.test(String(e.message)));
+      if (!retryable) throw e;
+      if (attempt === API_MAX_ATTEMPTS) {
+        if (e.status === 429 || e.status >= 500)
+          throw new Error("Z.ai is overloaded right now (HTTP " + e.status + ", " + API_MAX_ATTEMPTS +
+            " tries). That is shared capacity, not your key. Try again in a minute, or pick a paid model in Settings.");
+        throw e;
       }
-
-      // 2) captcha demanded — also right after a capacity retry, because
-      //    the failed request consumed the previous token
-      if (/captcha/i.test(msg) && BUDGET.captcha-- > 0) {
-        state.captchaNeeded = true;
-        state.captchaDemandedAt = Date.now();
-        setStatus("🔐 Z.ai wants a captcha check — bringing your chat.z.ai tab to the front; if a slider appears there, drag it once.");
-        await ensureFeVersion(true);
-        const solved = await getCaptchaToken(); // always a fresh solve — never reuse
-        if (!solved.token) throw new Error(captchaFailText(solved.stage));
-        state.captchaToken = solved.token;
-        continue;
+      // second failure in a row on a free model: try the other free model for this request
+      let switched = "";
+      if (attempt >= 2 && FREE_MODELS.includes(body.model) && (e.status === 429 || e.status >= 500)) {
+        body.model = FREE_MODELS[(FREE_MODELS.indexOf(body.model) + 1) % FREE_MODELS.length];
+        switched = " — trying " + body.model;
       }
-
-      // 3) Aliyun WAF block page — reloading the chat.z.ai tab is the only
-      //    thing that can run the WAF's own JS challenge (a fetched homepage
-      //    returns the challenge HTML but never executes it). From the
-      //    second strike the payload also goes lean.
-      const waf = e.waf || e.status === 405;
-      if (waf && BUDGET.waf-- > 0) {
-        wafStrikes++;
-        if (wafStrikes >= 2 && opts.leanMessages) {
-          useLean = true;
-          setStatus("🛡 Still blocked by Z.ai's protection layer — reloading the chat.z.ai tab and retrying with a leaner request (shorter history, no page snapshot)…");
-        } else {
-          setStatus("🛡 Z.ai's protection layer blocked the request — reloading the chat.z.ai tab to lift the block, then retrying…");
-        }
-        await reloadZaiTab();
-        await ensureFeVersion(true); // re-touch homepage → fresh cookies in this session too
-        await sleep(4000);
-        continue;
-      }
-
-      // 4) capacity → wait, retry the same model once, then the sibling once
-      const capacity = e.capacity || e.status === 503 || /at capacity/i.test(msg);
-      if (capacity && BUDGET.capacity-- > 0) {
-        capStrikes++;
-        const tried = state.model;
-        const sib = siblingModel(tried);
-        if (capStrikes >= 2 && !capSwitched && PREFERRED_MODELS.includes(tried)) {
-          capSwitched = true;
-          setStatus(`↩ Still at capacity — switching model "${tried}" → "${sib}" and retrying…`);
-          state.model = sib;
-          const sel = $("modelSelect");
-          if ([...sel.options].some((o) => o.value === sib)) {
-            sel.value = sib;
-            $("modelCustom").value = "";
-          } else {
-            $("modelCustom").value = sib;
-          }
-          saveSettings();
-        } else {
-          setStatus(`⏳ "${tried}" is at capacity — waiting a few seconds, then retrying…`);
-        }
-        await sleep(3000);
-        continue;
-      }
-
-      // budget exhausted or unknown error → one clear final message
-      if (waf) {
-        throw new Error(
-          "Z.ai's protection layer (WAF) kept blocking the request even after " +
-          "a cookie refresh and a lean retry. Open chat.z.ai in a normal tab and " +
-          "send one message there — that lifts the block — then try the panel again."
-        );
-      }
-      if (capacity) {
-        throw new Error(
-          'Z.ai: "' + state.model + '" is still at capacity after several retries' +
-          (capSwitched ? " and a fallback-model switch" : "") +
-          " — the servers are loaded right now. Try again in a few minutes."
-        );
-      }
-      if (/captcha/i.test(msg)) {
-        throw new Error(
-          "Z.ai kept demanding a captcha even after repeated automatic solves " +
-          "(server-side risk control on this account/IP). Open chat.z.ai in a " +
-          "normal tab, send any message once — solve the slider if it appears — " +
-          "then try the panel again."
-        );
-      }
-      throw e;
+      const base = e.retryAfterMs != null ? e.retryAfterMs : API_BACKOFF_MS[Math.min(attempt - 1, API_BACKOFF_MS.length - 1)];
+      const delay = base + Math.floor(Math.random() * 500);
+      setStatus("Z.ai is busy (" + (e.status ? "HTTP " + e.status : "network") + "), retrying in " +
+        Math.round(delay / 1000) + " s (" + attempt + "/" + (API_MAX_ATTEMPTS - 1) + ")" + switched);
+      await abortableSleep(delay, signal);
+    } finally {
+      clearTimeout(idle);
+      if (signal) signal.removeEventListener("abort", onAbort);
     }
   }
-
-  // total budget exhausted — summarize by error family
-  const msg = String((lastErr && lastErr.message) || "");
-  if (lastErr && (lastErr.waf || lastErr.status === 405)) {
-    throw new Error(
-      "Z.ai's protection layer (WAF) kept blocking the request even after " +
-      "a cookie refresh and a lean retry. Open chat.z.ai in a normal tab and " +
-      "send one message there — that lifts the block — then try the panel again."
-    );
-  }
-  if (/captcha/i.test(msg)) {
-    throw new Error(
-      "Z.ai kept demanding a captcha even after repeated automatic solves " +
-      "(server-side risk control on this account/IP). Open chat.z.ai in a " +
-      "normal tab, send any message once — solve the slider if it appears — " +
-      "then try the panel again."
-    );
-  }
-  if (lastErr && (lastErr.capacity || lastErr.status === 503 || /at capacity/i.test(msg))) {
-    throw new Error(
-      'Z.ai: "' + state.model + '" and its fallback stayed at capacity after ' +
-      "several retries — the servers are loaded right now. Try again in a few minutes."
-    );
-  }
-  throw lastErr || new Error("chat.z.ai request failed");
+  throw lastErr || new Error("API request failed");
 }
 
-/* ── sessions ─────────────────────────────────────────────── */
-
-async function listChats() {
-  const res = await fetch(BASE_URL + "/api/v1/chats/?page=1", {
-    headers: { authorization: "Bearer " + state.token },
-    credentials: "include"
-  });
-  if (res.status === 401) throw new Error("Session expired — click Connect again.");
-  if (!res.ok) throw new Error("chats list failed (" + res.status + ")");
-  const j = await res.json();
-  const arr = Array.isArray(j) ? j : j.chats || j.data || [];
-  return arr
-    .map((c) => ({
-      id: c.id,
-      title: c.title || "(untitled)",
-      updated_at: c.updated_at || c.updatedAt || 0
-    }))
-    .sort((a, b) => (b.updated_at || 0) - (a.updated_at || 0))
-    .slice(0, 40);
-}
-
-async function loadChatMessages(chatId) {
-  const res = await fetch(BASE_URL + "/api/v1/chats/" + chatId, {
-    headers: { authorization: "Bearer " + state.token },
-    credentials: "include"
-  });
-  if (!res.ok) return [];
-  const j = await res.json();
-  const chat = j.chat || j;
-  const msgs = (chat && chat.messages) || [];
-  return msgs
-    .map((m) => ({
-      role: m.role,
-      content:
-        typeof m.content === "string"
-          ? m.content
-          : Array.isArray(m.content)
-            ? m.content.map((p) => (p && p.text) || "").join("")
-            : ""
-    }))
-    .filter((m) => m.content);
+async function streamCompletion(opts) {
+  return streamCompletionApi(opts);
 }
 
 async function refreshModels() {
   const sel = $("modelSelect");
-  try {
-    const res = await fetch(BASE_URL + "/api/models", {
-      headers: { authorization: "Bearer " + state.token },
-      credentials: "include"
-    });
-    if (!res.ok) throw new Error();
-    const j = await res.json();
-    let ids = Array.isArray(j)
-      ? j.map((m) => (typeof m === "string" ? m : m.id || m.name))
-      : (j.data || j.models || []).map((m) => (typeof m === "string" ? m : m.id || m.name));
-    ids = [...new Set(ids.filter(Boolean))];
-    if (!ids.length) throw new Error();
-    // preferred current models first, preview/experimental models last
-    ids.sort((a, b) => {
-      const pa = PREFERRED_MODELS.indexOf(a), pb = PREFERRED_MODELS.indexOf(b);
-      if (pa >= 0 || pb >= 0) return (pa < 0 ? 99 : pa) - (pb < 0 ? 99 : pb);
-      return 0;
-    });
-    sel.innerHTML = ids.map((id) => `<option value="${esc(id)}">${esc(id)}</option>`).join("");
-    if (ids.includes(state.model)) {
-      sel.value = state.model;
-    } else {
-      // saved model was removed server-side (e.g. glm-4.6) → migrate to the
-      // site default, otherwise the dropdown silently lands on "x-preview-l",
-      // a captcha-gated model that always errors.
-      const next =
-        PREFERRED_MODELS.find((m) => ids.includes(m)) ||
-        ids.find((id) => !/^x-/.test(id)) ||
-        ids[0];
-      sel.value = next;
-      toast(`Model "${state.model}" is no longer available — switched to "${next}".`);
-      state.model = next;
-      saveSettings();
-    }
-  } catch {
-    sel.innerHTML = FALLBACK_MODELS.map(
-      (id) => `<option value="${esc(id)}">${esc(id)}</option>`
-    ).join("");
-    if (!FALLBACK_MODELS.includes(state.model)) {
-      sel.value = DEFAULT_MODEL;
-      state.model = DEFAULT_MODEL;
-      saveSettings();
-    } else {
-      sel.value = state.model;
-    }
-  }
+  sel.innerHTML = API_MODELS.map((id) => `<option value="${esc(id)}">${esc(id)}</option>`).join("");
+  if (localStorage.getItem("zaiApiModelChosen") !== "1") state.model = API_DEFAULT_MODEL;
+  sel.value = API_MODELS.includes(state.model) ? state.model : API_DEFAULT_MODEL;
   if ($("modelCustom").value.trim()) sel.value = "custom";
   syncModelFromUi();
 }
@@ -949,43 +435,74 @@ function syncModelFromUi() {
 
 /* ── connect ──────────────────────────────────────────────── */
 
-async function connect() {
-  setConn("Connecting…", "conn-off");
-  let resp = await chrome.runtime.sendMessage({ type: "GRAB_ZAI_TOKEN" });
-  if (!resp || !resp.ok) {
-    // fall back to manual token if the user saved one
-    const manual = (localStorage.getItem("zaiManualToken") || "").trim();
-    if (manual) {
-      resp = { ok: true, token: manual };
-    } else {
-      try {
-        const t = await guestToken();
-        resp = { ok: true, token: t, guest: true };
-      } catch (e) {
-        setConn("Not connected", "conn-off");
-        toast("Connect failed: " + e.message);
-        return;
-      }
+const KEY_STAGE_HELP = {
+  not_logged_in: "Sign in to Z.ai on the page that just opened, then press Connect again.",
+  no_create_button: "I could not find the “create key” button (the page may have changed).",
+  key_not_found: "The key did not appear on the page (a verification step may be waiting for you).",
+  inject_failed: "I could not run on that page.",
+  exception: "Something went wrong on the page."
+};
+
+// With the user's approval: open THEIR Z.ai key page, press its "create key" button, read the new
+// key from the page and keep it in this browser. Returns true when a key was saved.
+async function autoCreateApiKey() {
+  const approved = await approveAction(
+    "Allow Sidebar Agent to set up your key?\n\n" +
+    "• opens your Z.ai API-keys page (z.ai/manage-apikey)\n" +
+    "• presses “Create API Key” in your own account\n" +
+    "• copies the new key and keeps it in this browser only\n\n" +
+    "The key is sent only to api.z.ai. You can delete it any time on that page."
+  );
+  if (!approved) return false;
+  setConn("Creating your key…", "conn-off");
+  let tab;
+  try {
+    tab = await chrome.tabs.create({ url: API_KEY_URL, active: true });
+    await waitForTabLoad(tab.id, 25000);
+    tab = await chrome.tabs.get(tab.id);
+  } catch (e) {
+    toast("Could not open the key page: " + (e && e.message ? e.message : e));
+    return false;
+  }
+  let host = "";
+  try { host = new URL(tab.url || "").hostname; } catch {}
+  let res;
+  if (host !== "z.ai" && !host.endsWith(".z.ai")) {
+    res = { ok: false, stage: "not_logged_in" }; // redirected away from the key page: login screen
+  } else {
+    try {
+      const [r] = await chrome.scripting.executeScript({
+        target: { tabId: tab.id }, func: zaiKeyCreator, args: ["Sidebar Agent"]
+      });
+      res = (r && r.result) || { ok: false, stage: "exception" };
+    } catch (e) {
+      res = { ok: false, stage: "inject_failed" };
     }
   }
-  state.token = resp.token;
-  const payload = decodeJwtPayload(resp.token);
-  state.userId = payload.id || payload.sub || "unknown";
-  state.userName = resp.guest
-    ? "Guest"
-    : payload.email
-      ? payload.email.split("@")[0]
-      : payload.name || "user";
-  localStorage.setItem("zaiManualToken", "");
+  if (res.ok && res.key) {
+    localStorage.setItem("zaiApiKey", res.key);
+    res.key = "";
+    return true;
+  }
+  toast((KEY_STAGE_HELP[res.stage] || KEY_STAGE_HELP.exception) +
+    (res.stage === "not_logged_in" ? "" : " Create a key on that page and paste it in Settings → Advanced."), 12000);
+  return false;
+}
 
-  await ensureFeVersion();
+async function connect() {
+  const apiKey = (localStorage.getItem("zaiApiKey") || "").trim();
+  if (!apiKey) {
+    state.apiKey = ""; state.token = "";
+    if (await autoCreateApiKey()) return connect(); // key saved: reconnect through the normal path
+    setConn("Not connected", "conn-off");
+    return;
+  }
+  state.apiKey = apiKey;
+  state.token = "api-key";
+  state.userName = "API key";
   await refreshModels();
-  renderSessions();
-  setConn(
-    resp.guest ? "Connected as Guest (limited models)" : "Connected: " + state.userName,
-    "conn-on"
-  );
-  toast("Connected to Z.ai ✔");
+  setConn("Connected: official API (key)", "conn-on");
+  toast("Using your Z.ai API key ✔");
   addMsgEl("tool", "Now you can chat in your language.");
 }
 
@@ -996,6 +513,17 @@ function setConn(text, cls) {
 }
 
 /* ═══════════════════════════ page agent ═══════════════════════════ */
+
+// Bound a promise so a silent tab cannot freeze the whole panel.
+function withTimeout(promise, ms, message) {
+  let timer;
+  return Promise.race([
+    promise,
+    new Promise((_, reject) => {
+      timer = setTimeout(() => reject(new Error(message)), ms);
+    })
+  ]).finally(() => clearTimeout(timer));
+}
 
 async function activeTab() {
   const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
@@ -1091,15 +619,16 @@ function detachPage() {
   $("pageChip").classList.add("hidden");
 }
 
-function snapshotToContext(snap) {
+function snapshotToContext(snap, maxText = 4000, maxEls = 60) {
   const elems = (snap.elements || [])
+    .slice(0, maxEls)
     .map((e) => `- [${e.id}] ${e.desc}`)
     .join("\n");
   const sel = String(snap.selection || "").trim();
   return (
     `[PAGE SNAPSHOT]\nURL: ${snap.url}\nTitle: ${snap.title}\n` +
     (sel ? `TEXT THE USER HAD SELECTED:\n"""\n${sel.slice(0, 1500)}\n"""\n` : "") +
-    `VISIBLE TEXT (trimmed):\n"""\n${(snap.text || "").slice(0, 7000)}\n"""\n` +
+    `VISIBLE TEXT (trimmed):\n"""\n${(snap.text || "").slice(0, maxText)}\n"""\n` +
     `INTERACTIVE ELEMENTS:\n${elems}`
   );
 }
@@ -1205,6 +734,98 @@ function fileBridgeContext(lean) {
       ? `\n\n(contents omitted for ${omitted.length} file(s) to keep the request small)`
       : "")
   );
+}
+
+// Turn a data: URL from captureVisibleTab into a real File so it can be fed
+// to any page's <input type=file> (e.g. the image box of a LinkedIn post).
+function dataUrlToFile(dataUrl, name) {
+  const parts = String(dataUrl).split(",");
+  const meta = parts[0] || "";
+  const b64 = parts[1] || "";
+  const mime = (meta.match(/data:([^;]+)/) || [])[1] || "image/png";
+  const bin = atob(b64);
+  const u8 = new Uint8Array(bin.length);
+  for (let i = 0; i < bin.length; i++) u8[i] = bin.charCodeAt(i);
+  return new File([u8], name, { type: mime });
+}
+
+// Capture the visible area of the attached (active) tab as a PNG data URL.
+// The tab is re-checked before and after the capture: captureVisibleTab grabs
+// whatever is on screen, so a tab switch mid-approval would otherwise attach a
+// screenshot of the wrong page to the post.
+// Captures the tab the user is looking at RIGHT NOW. The old version compared the tab URL with
+// the URL of the last snapshot, so after a navigate (or any SPA route change) it threw
+// "the tab has changed" and the model reported that it could not take screenshots.
+async function captureScreenshot() {
+  const tab = await activeTab();
+  if (!tab || !tab.id) throw new Error("No active tab to capture.");
+  const url = tab.url || "";
+  const blocked = friendlyAttachReason(url);
+  if (blocked) throw new Error("Cannot capture this tab: " + blocked + ".");
+  const dataUrl = await chrome.tabs.captureVisibleTab(tab.windowId, { format: "png" });
+  const [now] = await chrome.tabs.query({ windowId: tab.windowId, active: true });
+  if (!now || now.id !== tab.id || now.url !== url)
+    throw new Error("The tab changed during the capture, so the image was discarded. Try again.");
+  if (!/^data:image\/png;base64,[A-Za-z0-9+/]+=*$/.test(dataUrl || ""))
+    throw new Error("Chrome returned no PNG image.");
+  return dataUrl;
+}
+
+function screenshotError(error) {
+  const raw = error && error.message ? error.message : String(error);
+  const hint = /permission|cannot access|not allowed/i.test(raw)
+    ? " Chrome refused the capture: use a normal http(s) tab that is visible in this window (not a browser page, the Web Store, or a tab with DevTools open)."
+    : "";
+  return "Screenshot failed — " + raw + hint;
+}
+
+// Polls the tab until it finished loading (status "complete"), with a hard limit.
+async function waitForTabLoad(tabId, limitMs) {
+  const t0 = Date.now();
+  let sawLoading = false;
+  while (Date.now() - t0 < limitMs) {
+    await sleep(250);
+    let tab;
+    try { tab = await chrome.tabs.get(tabId); } catch { return; }
+    if (tab.status === "loading") sawLoading = true;
+    if (tab.status === "complete" && (sawLoading || Date.now() - t0 > 2500)) break;
+  }
+  await sleep(500); // let single-page apps paint their first view
+}
+
+// navigate is done by the PANEL through chrome.tabs.update. It used to run inside the page
+// (location.href) and needed an attachable page first, so it failed on the New Tab page and
+// never waited for the load; the next read/screenshot then hit a dead or stale page.
+async function panelNavigate(act) {
+  const raw = String(act.url || act.link || act.href || "").trim();
+  if (!raw) return "[TOOL RESULT] error: navigate requires a URL";
+  const tab = await activeTab();
+  if (!tab || !tab.id) return "[TOOL RESULT] error: no active tab found";
+  let url;
+  try {
+    url = new URL(raw, /^https?:/i.test(tab.url || "") ? tab.url : undefined).href;
+  } catch {
+    return "[TOOL RESULT] error: navigate needs a full http(s) URL (got: " + raw + ")";
+  }
+  if (!/^https?:/i.test(url))
+    return "[TOOL RESULT] error: navigate only supports http(s) URLs (got: " + url + ")";
+  if (state.confirmMode) {
+    const ok = await approveAction(JSON.stringify({ action: "navigate", url }, null, 2));
+    if (!ok) return "[TOOL RESULT] skipped by user";
+  }
+  try {
+    await chrome.tabs.update(tab.id, { url });
+    await waitForTabLoad(tab.id, 20000);
+  } catch (e) {
+    return "[TOOL RESULT] error: navigation failed — " + (e && e.message ? e.message : e);
+  }
+  state.attached = null;
+  $("pageChip").classList.add("hidden");
+  const at = await attachPage(true);
+  if (!at.ok)
+    return "[TOOL RESULT] navigated to " + url + ", but the page cannot be read: " + at.reason;
+  return "[TOOL RESULT] navigated to " + at.attached.url + "\n" +
+    snapshotToContext(at.attached.snapshot, 3000, 50);
 }
 
 function abToB64(buf) {
@@ -1333,7 +954,77 @@ function extractActionBlocks(text) {
   return blocks;
 }
 
+// GLM sometimes writes actions as loose prose instead of a fenced JSON block,
+// e.g. "action navigate url: https://x.com/" or "action screenshot بگیر" or
+// "اسکرینشات بگیر". Recognise those too so the step actually runs instead of
+// being shown as dead text. The last such command in the reply wins.
+function parseLooseAction(text) {
+  const src = String(text || "");
+  const re =
+    /(?:^|[^A-Za-z0-9])action\s+(navigate|screenshot|click|type|press|scroll|extract|read|upload|done)\b([^\n]*)/gi;
+  let m, last = null;
+  while ((m = re.exec(src))) {
+    if (last) break; // one action per turn — take the FIRST runnable one
+    const name = m[1].toLowerCase();
+    const tail = m[2] || "";
+    const act = { action: name };
+    if (name === "navigate") {
+      const u = tail.match(/https?:\/\/[^\s"'<>،,)+]+/i);
+      if (u) act.url = u[0];
+      else return null; // a navigate with no URL is not runnable
+    } else if (name === "click" || name === "type" || name === "press" || name === "upload") {
+      const t = tail.match(/(?:target|element)\s*[:=]\s*([^\s،,]+)/i) ||
+        tail.match(/\b(e\d+)\b/i);
+      if (t) act.target = t[1];
+      const tx = tail.match(/text\s*[:=]\s*["']?([^"'\n]+?)["']?(?:\s|$)/i);
+      if (tx) act.text = tx[1].trim();
+      const k = tail.match(/key\s*[:=]\s*([A-Za-z]+)/i);
+      if (k) act.key = k[1];
+    } else if (name === "scroll") {
+      const d = tail.match(/\b(up|down|top|bottom)\b/i);
+      if (d) act.direction = d[1].toLowerCase();
+    } else if (name === "extract") {
+      const q = tail.match(/query\s*[:=]\s*["']?([^"'\n]+)/i);
+      if (q) act.query = q[1].trim();
+    }
+    last = act;
+  }
+  // Persian bare screenshot instruction with no "action" word at all.
+  if (!last && /اسکرین\s*شات\s*(?:بگیر|بگیریم|بگیرید)/i.test(src)) {
+    last = { action: "screenshot" };
+  }
+  return last;
+}
+
+// GLM almost never sends "target". It sends ref / id / elementId, or a human
+// label ("Start a post button"). Fold every alias into one canonical action so
+// the agent, the approval dialog and the chat history all agree on the target.
+const TARGET_ALIASES = ["ref", "refId", "ref_id", "id", "elementId", "element_id", "eid", "targetId", "target_id", "locator", "node"];
+
+function normalizeAction(act) {
+  if (!act || typeof act !== "object") return act;
+  const a = { ...act };
+  const usable = (v) => typeof v === "string" && v.trim();
+  if (!usable(a.target)) {
+    for (const key of TARGET_ALIASES) {
+      if (usable(a[key])) { a.target = a[key].trim(); break; }
+    }
+  }
+  // "element" is often the description from the snapshot — still a real target
+  if (!usable(a.target) && usable(a.element)) a.target = a.element.trim();
+  if (!usable(a.text) && usable(a.value)) a.text = a.value;
+  if (!usable(a.text) && usable(a.content)) a.text = a.content;
+  if (a.files === undefined && usable(a.file)) a.files = [a.file.trim()];
+  if (a.files === undefined && usable(a.filename)) a.files = [a.filename.trim()];
+  return a;
+}
+
 function parseAction(text) {
+  const act = parseActionRaw(text);
+  return act ? normalizeAction(act) : act;
+}
+
+function parseActionRaw(text) {
   let firstBroken = null;
   for (const b of extractActionBlocks(text)) {
     const obj = tryParseActionJSON(b.body);
@@ -1354,7 +1045,8 @@ function parseAction(text) {
   if (firstBroken) {
     return { action: "error", error: "unparseable action block", raw: firstBroken };
   }
-  return null;
+  // last resort: loose "action <name> ..." prose (web-fetch drift fallback)
+  return parseLooseAction(text);
 }
 
 function approveAction(jsonStr) {
@@ -1373,9 +1065,14 @@ function approveAction(jsonStr) {
 }
 
 async function executeAction(act) {
+  act = normalizeAction(act);
+  if (act.action === "navigate") return panelNavigate(act);
+  if (act.action === "screenshot") return panelScreenshot();
   if (!state.attached) {
     const at = await attachPage(true);
-    if (!at.ok) return "[TOOL RESULT] error: no attachable page — " + at.reason;
+    if (!at.ok)
+      return "[TOOL RESULT] error: no attachable page — " + at.reason +
+        '. Open a normal website first with {"action":"navigate","url":"https://…"}.';
   }
   const tabId = state.attached.tabId;
 
@@ -1416,7 +1113,15 @@ async function executeAction(act) {
       });
     cmd = { action: "upload", target: act.target || act.selector || "", files: payloads };
   }
-  const res = await callAgent(tabId, cmd);
+  // A content script that never answers (page crashed, tab discarded, a modal
+  // dialog) used to freeze the panel with no way out. Bound every page call.
+  let res;
+  try {
+    res = await withTimeout(callAgent(tabId, cmd), 8000,
+      "The page did not confirm the action within 8 seconds. Check the tab before retrying.");
+  } catch (e) {
+    return "[TOOL RESULT] error: " + (e && e.message ? e.message : e);
+  }
   if (res.error) {
     // ids go stale as soon as the page re-renders (even our own clicks swap
     // DOM nodes). On "not found" fetch a fresh snapshot INLINE so the model's
@@ -1441,21 +1146,26 @@ async function executeAction(act) {
 
   switch (act.action) {
     case "click":
+    case "press": {
+      // A dispatched click proves nothing, and the model's next step would be a separate "read"
+      // request. Read here instead: one request less per action, and fresh element ids.
+      const after = await compactReadAfterAction(tabId);
+      return "[TOOL RESULT] " + (act.action === "click" ? "Click" : "Key press") +
+        " dispatched; the outcome is not verified" +
+        (after ? ". The page right after it:\n" + after : ". Read the page before claiming success.");
+    }
     case "scroll":
-      return `[TOOL RESULT] ${act.action} ok. Page title: ${res.title || state.attached.title}` +
+      return `[TOOL RESULT] scroll ok. Page title: ${res.title || state.attached.title}` +
         (res.notice ? ` (${res.notice})` : "");
     case "type":
       // verified result: the text is REALLY in the field now (read back)
       return `[TOOL RESULT] type confirmed — the field now holds ${res.typed} chars: "${res.preview || ""}"` +
         `. Page title: ${res.title || state.attached.title}`;
-    case "press":
-      return `[TOOL RESULT] press ok. Page title: ${res.title || state.attached.title}` +
-        (res.notice ? ` (${res.notice})` : "");
     case "extract":
       return "[TOOL RESULT]\n" + String(res.text || "").slice(0, 3000);
     case "read":
       state.attached.snapshot = res;
-      return "[TOOL RESULT]\n" + snapshotToContext(res).slice(0, 9000);
+      return "[TOOL RESULT]\n" + snapshotToContext(res);
     case "navigate":
       return "[TOOL RESULT] navigated to " + res.url;
     case "upload":
@@ -1468,7 +1178,76 @@ async function executeAction(act) {
   }
 }
 
+async function compactReadAfterAction(tabId) {
+  await sleep(700);
+  try {
+    const snap = await withTimeout(callAgent(tabId, { action: "read" }), 6000, "read timed out");
+    if (snap && !snap.error) {
+      state.attached.snapshot = snap;
+      return snapshotToContext(snap, 1500, 40);
+    }
+  } catch {}
+  return "";
+}
+
+async function panelScreenshot() {
+  try {
+    const dataUrl = await captureScreenshot();
+    const name = "screenshot-" + Date.now() + ".png";
+    const file = dataUrlToFile(dataUrl, name);
+    state.fileBridge.push({ path: name, size: file.size, text: "", file });
+    updateAttachBadge();
+    addScreenshotEl(dataUrl, name);
+    return (
+      "[TOOL RESULT] screenshot captured from the active tab (" +
+      Math.max(1, Math.round(file.size / 1024)) + " KB), shown in the chat and " +
+      'attached to the 📎 bridge as "' + name + '". To put it in a post, use ' +
+      '{"action":"upload","files":["' + name + '"]} on that page (target the image/file input if needed).'
+    );
+  } catch (e) {
+    return "[TOOL RESULT] error: " + screenshotError(e);
+  }
+}
+
 /* ═══════════════════════════ chat rendering ═══════════════════════════ */
+
+// Show a captured screenshot inline in the chat (proof to the user that a
+// real image was taken) with a caption and a click-to-download link.
+function addScreenshotEl(dataUrl, name) {
+  const wrap = document.createElement("div");
+  wrap.className = "msg msg-shot";
+  const cap = document.createElement("div");
+  cap.className = "shot-cap";
+  cap.textContent = "📷 Screenshot — " + name;
+  const img = document.createElement("img");
+  img.className = "shot-img";
+  img.src = dataUrl;
+  img.alt = name;
+  const dl = document.createElement("a");
+  dl.className = "shot-dl";
+  dl.href = dataUrl;
+  dl.download = name;
+  dl.textContent = "Download PNG";
+  wrap.appendChild(cap);
+  wrap.appendChild(img);
+  wrap.appendChild(dl);
+  $("chatLog").appendChild(wrap);
+  $("chatLog").scrollTop = $("chatLog").scrollHeight;
+}
+
+// Re-rendering the whole reply (escape + 5 regexes + innerHTML) for every streamed token
+// was the main source of panel lag on long answers. Coalesce into one render per 80 ms and
+// only follow the stream if the user has not scrolled up.
+function scheduleRender(bubble) {
+  if (bubble._renderTimer) return;
+  bubble._renderTimer = setTimeout(() => {
+    bubble._renderTimer = null;
+    const log = $("chatLog");
+    const stick = log.scrollHeight - log.scrollTop - log.clientHeight < 80;
+    bubble.innerHTML = mdLite(stripGlmBlocks(bubble._raw || "") || "…");
+    if (stick) log.scrollTop = log.scrollHeight;
+  }, 80);
+}
 
 function addMsgEl(kind, text) {
   const div = document.createElement("div");
@@ -1521,6 +1300,22 @@ function clearEmptyState() {
   if (es) es.remove();
 }
 
+// New chat: wipe the conversation but keep the connection, attachment settings
+// and the saved API key untouched. (Was wired to the ＋ button without ever
+// being defined — the missing definition crashed the whole panel init and
+// silently disabled the send button / Enter key. Fixed in 1.0.36.)
+function newChat() {
+  state.messages = [];
+  state.chatTitle = "New chat";
+  state.chatId = uuid();
+  state.attached = null;
+  state.pageNote = null;
+  $("pageChip").classList.add("hidden");
+  renderHistory();
+  updateAttachBadge();
+  toast("New chat started.");
+}
+
 /* ═══════════════════════════ send / agent loop ═══════════════════════════ */
 
 async function send() {
@@ -1529,7 +1324,7 @@ async function send() {
   const text = input.value.trim();
   if (!text) return;
   if (!state.token) {
-    toast("Connect to Z.ai first.");
+    toast("Click Connect first (you will be guided to create a free Z.ai API key).");
     return;
   }
 
@@ -1558,7 +1353,8 @@ async function send() {
     let steps = 0;
     let nudges = 0; // self-heal attempts for malformed action blocks
     let executedThisTurn = 0;
-    let claimNudged = false;
+    let refusals = 0; // times the model refused to act or claimed an action it never ran
+    let lastAction = ""; // last action that actually succeeded, to catch stalls
     let lastReply = "";
     while (steps < MAX_AGENT_STEPS) {
       steps++;
@@ -1569,31 +1365,28 @@ async function send() {
 
       const { content, reasoning } = await streamCompletion({
         messages,
-        // used by the WAF heal path when a full payload keeps getting blocked
-        leanMessages: () => buildLlmMessages(true),
-        chatId: state.chatId,
         signal: state.abort.signal,
         onDelta: (rDelta, cDelta) => {
           if (rDelta) {
             if (!thinkEl) {
               thinkEl = document.createElement("details");
               thinkEl.className = "msg msg-thinking";
-              thinkEl.innerHTML = `<summary>💭 thinking…</summary><div class="think-body"></div>`;
+              thinkEl.innerHTML = `<summary>💭 thinking</summary><div class="think-body"></div>`;
+              thinkEl._text = document.createTextNode("");
+              thinkEl.querySelector(".think-body").appendChild(thinkEl._text);
               $("chatLog").insertBefore(thinkEl, bubble);
             }
-            thinkEl.querySelector(".think-body").textContent += rDelta;
-            thinkEl.querySelector("summary").textContent = "💭 thinking";
+            thinkEl._text.appendData(rDelta); // no whole-string rewrite per token
           }
           if (cDelta) {
             bubble._raw = (bubble._raw || "") + cDelta;
-            // never show Z.ai's raw native tool-call / result JSON
-            bubble.innerHTML = mdLite(stripGlmBlocks(bubble._raw) || "…");
+            scheduleRender(bubble); // re-render at most ~12x/s, not once per token
           }
-          $("chatLog").scrollTop = $("chatLog").scrollHeight;
         }
       });
 
       bubble.classList.remove("cursor-blink");
+      if (bubble._renderTimer) { clearTimeout(bubble._renderTimer); bubble._renderTimer = null; }
       const rawContent = String(content || bubble._raw || "");
       const visibleContent = stripGlmBlocks(rawContent);
       bubble._raw = visibleContent || "(empty reply)";
@@ -1626,16 +1419,49 @@ async function send() {
       state.messages.push({ role: "assistant", content: storedContent });
       lastReply = visibleContent;
       if (!act) {
-        if (!claimNudged && executedThisTurn === 0 && ACTION_CLAIM_RE.test(visibleContent)) {
-          claimNudged = true;
+        // A long reply is an answer, not a refusal: the guards only apply to short replies.
+        const shortReply = visibleContent.length < 800;
+        const denied = shortReply && CAPABILITY_DENIAL_RE.test(visibleContent);
+        const claimed = shortReply && ACTION_CLAIM_RE.test(visibleContent);
+        // The model either refused ("I have no click/type tool") or described an
+        // action it never ran. Neither is an acceptable answer while the task is
+        // still undone — never let a refusal end the turn as if it were a result.
+        if (executedThisTurn === 0 && (denied || claimed) && refusals < 2) {
+          refusals++;
+          bubble.remove(); // do not leave a false claim standing in the chat
+          if (refusals === 1) {
+            addMsgEl("tool", denied
+              ? "↩ The model claimed it has no browser tools — correcting it (1/2)…"
+              : "↩ The model described an action it never ran — correcting it (1/2)…");
+            state.messages.push({
+              role: "user",
+              content:
+                "[SYSTEM] Stop — that reply is not acceptable. Your statement about your own tools is factually wrong for this session. " +
+                "You are NOT the chat.z.ai assistant here: you are the agent running inside a Chrome extension, and the fenced ```action blocks in your instructions " +
+                "(click / type / press / scroll / extract / read / navigate / screenshot / upload) are executed FOR REAL in the user's active tab. " +
+                "The [PAGE SNAPSHOT] you received is the live DOM of that tab, not a web fetch, and it is not empty. " +
+                "Do not describe your capabilities, do not say you cannot control the browser, do not tell the user to do it themselves. " +
+                "Emit exactly ONE ```action block now for the next step of the user's request — or name one concrete blocker that is visible in the page data."
+            });
+            continue;
+          }
+          addMsgEl("tool", "↩ Still no action block — asking for one literal line (2/2)…");
           state.messages.push({
             role: "user",
             content:
-              "[SYSTEM] No action block was executed in this turn, so you did NOT click, type, send, open or change anything on the page. Either emit the required ```action block now, or correct your reply and state plainly that you did not perform the action."
+              "[SYSTEM] Copy the block below verbatim, with no other text before or after it:\n" +
+              '```action\n{"action":"read"}\n```'
           });
           continue;
         }
-        break; // plain answer — done
+        if (executedThisTurn === 0 && (denied || claimed)) {
+          bubble.remove();
+          addMsgEl("error",
+            "Stopped: the model refused to act twice, so nothing was executed. No page was clicked, no text was typed and nothing was published. " +
+            "Re-send the request, or switch the model in Settings and try again.");
+          break;
+        }
+        break; // a plain answer with no pending work — done
       }
       if (act.action === "error") {
         console.warn("[Sidebar Agent] unparseable action block:", act.raw);
@@ -1664,13 +1490,25 @@ async function send() {
         break;
       }
 
+      // A repeated identical action is the model stalling: typing the same draft
+      // twice, clicking the same button twice. Do not run it again — say so.
+      const signature = JSON.stringify(act);
+      if (signature === lastAction && ["click", "type", "press", "upload"].includes(act.action)) {
+        const repeat = "[TOOL RESULT] That exact action already ran and succeeded. Do not repeat it. " +
+          "Take the NEXT step (type the post text, click the Post button, or read the page to confirm), " +
+          "or answer with {\"action\":\"done\"} if the task is finished.";
+        addMsgEl("tool", "↩ Same action repeated — skipped; asking for the next step.");
+        state.messages.push({ role: "user", content: repeat });
+        continue;
+      }
       const result = await executeAction(act);
-      if (!/^\[TOOL RESULT\] error:/.test(result)) executedThisTurn++;
+      if (!/^\[TOOL RESULT\] error:/.test(result)) { executedThisTurn++; lastAction = signature; }
+      else lastAction = "";
       addMsgEl("tool", result.length > 400 ? result.slice(0, 400) + " …" : result);
       state.messages.push({ role: "user", content: result });
     }
     if (steps >= MAX_AGENT_STEPS) {
-      addMsgEl("assistant", "_Reached the step limit (10 actions). Ask me to continue if needed._");
+      addMsgEl("assistant", "_Reached the step limit (" + MAX_AGENT_STEPS + " actions). Ask me to continue if needed._");
     }
   } catch (e) {
     if (bubble && !bubble._raw) bubble.remove(); // drop the empty placeholder
@@ -1688,103 +1526,66 @@ async function send() {
   }
 }
 
-function buildLlmMessages(lean = false) {
-  const msgs = [{ role: "system", content: SYSTEM_PROMPT }];
-  // priming pair — pins the browser-agent persona before any real history.
-  // Kept even in lean (WAF-retry) mode: without it the model drifts back to
-  // the plain-chat persona and starts claiming it "only has web search".
-  msgs.push({ role: "user", content: "Mode check: what are you and what can you do on this page?" });
-  msgs.push({
-    role: "assistant",
-    content:
-      "I am the browser-automation agent in your side panel. My only tools are real ```action blocks — click / type / press / scroll / extract / navigate / upload / done — and the extension executes them in the active tab. I have no web_search or WebFetch and no shell. I never use Z.ai's native <glm_block>/mcp_server tools — they are not connected to this tab. When you ask me to do something on the page, I act step by step; I never tell you to do it yourself and never expose my private reasoning."
-  });
-  if (state.attached && state.attached.snapshot) {
-    if (lean) {
-      // lean retry (WAF healing): a one-line page note instead of the full
-      // snapshot — big YouTube-sized bodies are what trips the WAF rules
-      msgs.push({
-        role: "user",
-        content:
-          "[PAGE SNAPSHOT]\nURL: " + (state.attached.snapshot.url || "") +
-          "\nTitle: " + (state.attached.snapshot.title || "") +
-          "\n(full snapshot trimmed to keep this retry request small)"
-      });
-    } else {
-      // user-role: GLM templates weight user turns above system turns
-      msgs.push({ role: "user", content: snapshotToContext(state.attached.snapshot) });
+
+// Every step re-sends the history. Keep the two newest page snapshots verbatim, stub out
+// older ones, and stop once the history passes a budget (newest turns win).
+const HISTORY_BUDGET = 14000;
+
+function compactHistory(list) {
+  let snapshotsKept = 0;
+  const stubbed = [];
+  for (let i = list.length - 1; i >= 0; i--) {
+    const m = list[i];
+    let content = String(m.content || "");
+    if (m.role === "user" && content.includes("[PAGE SNAPSHOT]")) {
+      snapshotsKept++;
+      if (snapshotsKept > 2)
+        content = content.split("\n")[0] + "\n[earlier page snapshot omitted to keep this request small]";
     }
+    stubbed.unshift({ ...m, content });
+  }
+  let total = 0;
+  const kept = [];
+  for (let i = stubbed.length - 1; i >= 0; i--) {
+    const len = stubbed[i].content.length;
+    if (total + len > HISTORY_BUDGET && kept.length >= 4) break;
+    total += len;
+    kept.unshift(stubbed[i]);
+  }
+  return kept;
+}
+
+function buildLlmMessages() {
+  const msgs = [{ role: "system", content: SYSTEM_PROMPT }];
+  const hist = compactHistory(state.messages.slice(-30));
+  const last = hist[hist.length - 1];
+  const lastIsTool = !!last && last.role === "user" && /^\[TOOL RESULT\]/.test(String(last.content));
+  // Mid-task the tool results already carry the page; sending the stored snapshot again every
+  // step doubles the request. Send it on a new user turn, or when no recent message has one.
+  const snapRecent = hist.slice(-8).some((m) => m.role === "user" && String(m.content).includes("[PAGE SNAPSHOT]"));
+  if (state.attached && state.attached.snapshot) {
+    if (!(lastIsTool && snapRecent))
+      msgs.push({ role: "user", content: snapshotToContext(state.attached.snapshot) });
   } else if (state.pageNote) {
     msgs.push({
       role: "user",
       content:
         "[PAGE SNAPSHOT UNAVAILABLE] " + state.pageNote +
-        " — the extension could not read the active tab. If the user asks " +
-        "about the page, say exactly that and suggest opening a normal " +
-        "website tab or reloading it (F5)."
+        " — the extension could not read the active tab. If the user asks about the page, say " +
+        "exactly that and suggest opening a normal website tab or reloading it (F5)."
     });
   }
   if (state.fileBridge && state.fileBridge.length) {
-    msgs.push({ role: "user", content: fileBridgeContext(lean) });
+    msgs.push({ role: "user", content: fileBridgeContext(false) });
   }
-  // cap history to last 30 messages (8 in lean retries) + a per-turn
-  // agent-mode reminder
-  const hist = state.messages.slice(lean ? -8 : -30);
-  const last = hist[hist.length - 1];
-  if (last && last.role === "user" && !/^\[(TOOL RESULT|PAGE SNAPSHOT)/.test(last.content)) {
+  if (last && last.role === "user" && !lastIsTool && !/^\[PAGE SNAPSHOT/.test(last.content)) {
     hist[hist.length - 1] = {
       ...last,
-      content:
-        last.content +
-        "\n\n(Agent mode reminder: to do anything on the page — click, type, press Enter, scroll, navigate, upload attached files — reply with an action block; the extension executes it for real. You have no other tools and must never say you do. Never tell the user to do it themselves.)"
+      content: last.content + "\n\n(To act on the page, reply with exactly one ```action block; the extension runs it in the active tab.)"
     };
   }
   msgs.push(...hist);
   return msgs;
-}
-
-/* ═══════════════════════════ sessions ui ═══════════════════════════ */
-
-async function renderSessions() {
-  const list = $("sessionList");
-  if (!state.token) {
-    list.innerHTML = `<div class="muted small pad8">Click Connect first — sessions come from your chat.z.ai account.</div>`;
-    return;
-  }
-  list.innerHTML = `<div class="muted small pad8">Loading…</div>`;
-  try {
-    const chats = await listChats();
-    list.innerHTML = "";
-    if (!chats.length) {
-      list.innerHTML = `<div class="muted small pad8">No chats on the account yet.</div>`;
-    }
-    for (const c of chats) {
-      const b = document.createElement("button");
-      b.className = "session-item" + (c.id === state.chatId ? " active" : "");
-      const d = new Date(c.updated_at || Date.now());
-      b.innerHTML = `<span class="s-title">${esc(c.title)}</span>` +
-        `<span class="s-date">${d.toLocaleDateString()} ${d.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}</span>`;
-      b.onclick = async () => {
-        state.chatId = c.id;
-        state.chatTitle = c.title;
-        state.messages = await loadChatMessages(c.id);
-        renderHistory();
-        renderSessions();
-        $("sessionsPanel").classList.add("hidden");
-      };
-      list.appendChild(b);
-    }
-  } catch (e) {
-    list.innerHTML = `<div class="muted small pad8">Failed: ${esc(e.message)}</div>`;
-  }
-}
-
-function newChat() {
-  state.chatId = uuid();
-  state.chatTitle = "New chat";
-  state.messages = [];
-  renderHistory();
-  $("sessionsPanel").classList.add("hidden");
 }
 
 /* ═══════════════════════════ settings ═══════════════════════════ */
@@ -1821,15 +1622,7 @@ document.addEventListener("DOMContentLoaded", async () => {
   loadSettings();
 
   $("btnConnect").onclick = connect;
-  $("btnSessions").onclick = () => {
-    $("sessionsPanel").classList.toggle("hidden");
-    $("settingsPanel").classList.add("hidden");
-    if (!$("sessionsPanel").classList.contains("hidden")) renderSessions();
-  };
-  $("btnSettings").onclick = () => {
-    $("settingsPanel").classList.toggle("hidden");
-    $("sessionsPanel").classList.add("hidden");
-  };
+  $("btnSettings").onclick = () => $("settingsPanel").classList.toggle("hidden");
   $("btnNewChat").onclick = newChat;
   $("btnRefreshModels").onclick = refreshModels;
   $("btnDetach").onclick = detachPage;
@@ -1888,8 +1681,8 @@ document.addEventListener("DOMContentLoaded", async () => {
       $("pageChip").classList.add("hidden");
     }
   });
-  $("modelSelect").onchange = syncModelFromUi;
-  $("modelCustom").oninput = syncModelFromUi;
+  $("modelSelect").onchange = () => { localStorage.setItem("zaiApiModelChosen", "1"); syncModelFromUi(); };
+  $("modelCustom").oninput = () => { localStorage.setItem("zaiApiModelChosen", "1"); syncModelFromUi(); };
   $("confirmMode").onchange = (e) => {
     state.confirmMode = e.target.checked;
     saveSettings();
@@ -1902,18 +1695,25 @@ document.addEventListener("DOMContentLoaded", async () => {
     state.showStatus = e.target.checked;
     saveSettings();
   };
-  $("btnSaveToken").onclick = () => {
-    const t = $("manualToken").value.trim();
-    if (t) {
-      localStorage.setItem("zaiManualToken", t);
-      toast("Token saved. Click Connect to use it.");
+  $("btnSaveApiKey").onclick = async () => {
+    const k = $("apiKey").value.trim();
+    $("apiKey").value = "";
+    if (k) {
+      localStorage.setItem("zaiApiKey", k);
+      await connect();
+    } else {
+      localStorage.removeItem("zaiApiKey");
+      state.apiKey = "";
+      state.token = "";
+      setConn("Not connected", "conn-off");
+      toast("API key removed.");
     }
   };
-
   // privacy / data controls (matches the published privacy policy)
   $("btnDisconnect").onclick = () => {
+    localStorage.removeItem("zaiApiKey");
+    state.apiKey = "";
     state.token = "";
-    state.userId = "";
     state.userName = "";
     state.chatId = uuid();
     state.chatTitle = "New chat";
@@ -1921,11 +1721,10 @@ document.addEventListener("DOMContentLoaded", async () => {
     state.attached = null;
     state.fileBridge = [];
     $("pageChip").classList.add("hidden");
-    localStorage.setItem("zaiManualToken", "");
     renderHistory();
     updateAttachBadge();
     setConn("Not connected", "conn-off");
-    toast("Disconnected — the saved Z.ai token was removed from this browser.");
+    toast("Disconnected — the saved API key was removed from this browser.");
   };
   $("btnClearChat").onclick = () => {
     state.messages = [];
@@ -1947,7 +1746,8 @@ document.addEventListener("DOMContentLoaded", async () => {
   });
 
   // restore settings + refresh models silently
-  ensureFeVersion();
+  const savedApiKey = (localStorage.getItem("zaiApiKey") || "").trim();
+  state.apiKey = savedApiKey;
   await refreshModels();
   const saved = JSON.parse(localStorage.getItem("zaiPanelSettings") || "{}");
   if (saved.model && [...$("modelSelect").options].some((o) => o.value === saved.model)) {
@@ -1957,7 +1757,6 @@ document.addEventListener("DOMContentLoaded", async () => {
   }
   syncModelFromUi();
 
-  // auto-reconnect with the last saved token
-  const manual = (localStorage.getItem("zaiManualToken") || "").trim();
-  if (manual) connect();
+  // auto-reconnect when a key is saved
+  if (savedApiKey) connect();
 });

@@ -3,20 +3,18 @@
   "name": "Sidebar Agent for Z.ai",
   "short_name": "Zai Agent",
   "author": "A.Amini",
-  "version": "1.0.21",
-  "description": "Unofficial side panel agent for Z.ai: ask about the current page, click, type and scroll with your approval. Uses your own account.",
+  "version": "1.0.36",
+  "description": "Unofficial side panel agent for Z.ai (GLM): ask about the current page and act with your approval. Uses your own API key.",
   "minimum_chrome_version": "116",
   "permissions": [
     "sidePanel",
     "tabs",
     "scripting",
-    "activeTab",
-    "declarativeNetRequest"
+    "activeTab"
   ],
   "host_permissions": [
-    "https://chat.z.ai/*",
-    "http://*/*",
-    "https://*/*"
+    "https://api.z.ai/*",
+    "<all_urls>"
   ],
   "background": {
     "service_worker": "background.js"

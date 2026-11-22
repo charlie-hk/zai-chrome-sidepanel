@@ -17,22 +17,11 @@
       </div>
     </div>
     <div class="hdr-actions">
-      <button id="btnConnect" class="btn btn-primary btn-sm" title="Connect to your logged-in chat.z.ai account">Connect</button>
-      <button id="btnSessions" class="btn btn-sm" title="Chat sessions">Sessions</button>
+      <button id="btnConnect" class="btn btn-primary btn-sm" title="Set up your Z.ai API key">Connect</button>
+      <button id="btnNewChat" class="btn btn-sm" title="New chat">＋</button>
       <button id="btnSettings" class="btn btn-sm" title="Settings">⚙</button>
     </div>
   </header>
-
-  <!-- ── Sessions drawer ────────────────────────────────────── -->
-  <section id="sessionsPanel" class="drawer hidden">
-    <div class="drawer-head">
-      <strong>Chat sessions</strong>
-      <button id="btnNewChat" class="btn btn-primary btn-sm">+ New chat</button>
-    </div>
-    <div id="sessionList" class="session-list">
-      <div class="muted small pad8">Click Connect first — sessions come from your chat.z.ai account.</div>
-    </div>
-  </section>
 
   <!-- ── Settings drawer ────────────────────────────────────── -->
   <section id="settingsPanel" class="drawer hidden">
@@ -41,40 +30,42 @@
       <span>Model</span>
       <div class="row">
         <select id="modelSelect"></select>
-        <button id="btnRefreshModels" class="btn btn-sm" title="Fetch model list from chat.z.ai">↻</button>
+        <button id="btnRefreshModels" class="btn btn-sm" title="Refresh the model list">↻</button>
       </div>
-    </label>
-    <label class="fld">
-      <span>Custom model id (optional)</span>
-      <input id="modelCustom" type="text" placeholder="e.g. glm-5.3" />
     </label>
     <label class="chk">
       <input id="confirmMode" type="checkbox" checked />
       <span>Ask before clicking / typing (recommended)</span>
     </label>
-    <label class="chk">
-      <input id="autoAttach" type="checkbox" checked />
-      <span>Auto-attach current page on every message</span>
-    </label>
-    <label class="chk">
-      <input id="showStatus" type="checkbox" />
-      <span>Show background retry / captcha status (off = quiet chat)</span>
-    </label>
-    <div class="fld">
-      <span>Manual token (fallback if Connect fails)</span>
-      <input id="manualToken" type="password" placeholder="paste localStorage.token from chat.z.ai" />
-      <button id="btnSaveToken" class="btn btn-sm">Save token</button>
-    </div>
     <div class="settings-actions">
       <button id="btnClearChat" class="btn btn-sm" title="Remove the panel's conversation history">Clear chat</button>
-      <button id="btnDisconnect" class="btn btn-sm btn-danger" title="Forget the saved Z.ai token and disconnect">Disconnect</button>
+      <button id="btnDisconnect" class="btn btn-sm btn-danger" title="Forget the saved key and disconnect">Disconnect</button>
     </div>
+    <details class="fld">
+      <summary>Advanced</summary>
+      <label class="fld">
+        <span>Custom model id (optional)</span>
+        <input id="modelCustom" type="text" placeholder="e.g. glm-5.3" />
+      </label>
+      <label class="chk">
+        <input id="autoAttach" type="checkbox" checked />
+        <span>Auto-attach current page on every message</span>
+      </label>
+      <label class="chk">
+        <input id="showStatus" type="checkbox" checked />
+        <span>Show retry status while working</span>
+      </label>
+      <div class="fld">
+        <span>Z.ai API key (Connect sets this for you; paste one here to use your own)</span>
+        <input id="apiKey" type="password" placeholder="paste a key from z.ai/manage-apikey" autocomplete="off" />
+        <button id="btnSaveApiKey" class="btn btn-sm">Save key &amp; connect</button>
+        <span class="muted small">Saved in this browser only and sent only to api.z.ai. Leave empty and save to remove it.</span>
+      </div>
+    </details>
     <div class="muted small pad8">
-      Requests go straight from this browser to chat.z.ai using your own
-      session. Nothing is sent anywhere else. This is an unofficial
-      integration — it may break if Z.ai changes its site.
-      Disconnect removes the saved token; Clear chat removes the panel's
-      conversation history.
+      Requests go straight from this browser to Z.ai (api.z.ai with your key).
+      Nothing is sent anywhere else. Disconnect removes the saved key; Clear
+      chat removes the panel's conversation history.
     </div>
   </section>
 
@@ -91,12 +82,18 @@
       <img src="../icons/icon128.png" alt="" class="empty-logo" />
       <h2>Sidebar Agent for Z.ai</h2>
       <p>
-        1. Click <b>Connect</b> — it links the panel to your logged-in
-        chat.z.ai account.<br />
-        2. Ask anything about <b>this page</b>, or tell the agent to click,
-        fill or scroll. It will ask before acting.
+        1. Click <b>Connect</b> and allow it to set up your Z.ai key (one time).<br />
+        2. Ask anything about <b>this page</b>, or tell the agent what to do.
       </p>
-      <p class="muted small">Now you can chat in your language.<br />© 2026 A.Amini — creator &amp; owner. All rights reserved.</p>
+      <div class="cap-grid">
+        <div><span>🌐</span> Open pages &amp; research</div>
+        <div><span>🔍</span> Search the web</div>
+        <div><span>🖱️</span> Click / type / scroll</div>
+        <div><span>📷</span> Take a screenshot</div>
+        <div><span>📎</span> Attach &amp; upload files</div>
+        <div><span>✍️</span> Draft &amp; publish posts</div>
+      </div>
+      <p class="muted small">Ask before acting (Confirm mode). Now you can chat in your language.<br />© 2026 A.Amini — creator &amp; owner. All rights reserved.</p>
     </div>
   </main>
 
@@ -129,6 +126,7 @@
 
   <div id="toast" class="toast hidden"></div>
 
+  <script src="keycreator.js"></script>
   <script src="sidepanel.js"></script>
 </body>
 </html>
